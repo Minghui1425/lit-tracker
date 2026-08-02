@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 是下限（代码用了 `X | None`），3.13 盯着上游别踩坑
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # 收藏库页面的 JS 语法检查要用 node --check；没有它那步会静默跳过
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: 跑测试
+        run: python -m pytest -q
+        # 测试全程离线：不打 PubMed，也不需要 NCBI_API_KEY
+
+      - name: 冒烟——示例配置能通过离线校验
+        run: python cli.py check --config configs/example-minimal.yaml
+
+      - name: 冒烟——Excel 模板能生成并转回 YAML
+        run: |
+          python cli.py template --out /tmp/t.xlsx
+          python cli.py from-excel --excel /tmp/t.xlsx --out /tmp/t.yaml
+          python cli.py check --config /tmp/t.yaml

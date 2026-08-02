@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lit-tracker.citations</string>
+
+  <!-- ① 把 /path/to/python3 换成你的 Python：终端里跑 which python3
+       ② 把 /path/to/lit-tracker 换成本项目所在目录（3 处都要换）
+       ③ 把配置文件名换成你自己的 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/python3</string>
+    <string>/path/to/lit-tracker/cli.py</string>
+    <string>citations</string>
+    <string>--config</string>
+    <string>/path/to/lit-tracker/configs/我的配置.yaml</string>
+    <!-- --catchup 的参数必须与下面 StartCalendarInterval 的 Weekday 一致 -->
+    <string>--catchup</string>
+    <string>3</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/path/to/lit-tracker</string>
+
+  <!-- 每周三 21:00 运行，特意排在周报（周二 20:00）之后：
+       这样每周新收藏的文献，到这时已经进库，一次就能把引用关系补齐。
+       改 Weekday 可换成别的日子（0=周日, 1=周一 …），记得同步改上面 --catchup 的值。 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key><integer>3</integer>
+    <key>Hour</key><integer>21</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <!-- 每次加载（通常＝每次登录）触发一次，用来补上关机期间错过的那一期。
+       配 --catchup 才不会天天重跑：本周期（从最近一个周三起）跑过就安静跳过。 -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- 日志目录必须先存在，否则 launchd 打不开重定向文件、直接启动失败（退出码 78） -->
+  <key>StandardOutPath</key>
+  <string>/path/to/lit-tracker/output/logs/citations.log</string>
+  <key>StandardErrorPath</key>
+  <string>/path/to/lit-tracker/output/logs/citations.err</string>
+</dict>
+</plist>

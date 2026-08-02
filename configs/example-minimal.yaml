@@ -1,0 +1,92 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 极简示例配置。用的是「心衰 / 糖尿病用药」这类通用话题，纯为演示格式——
+# 它能真的跑出结果，方便你先跑通再改成自己的方向。
+#
+#   python3 cli.py check   --config configs/example-minimal.yaml
+#   python3 cli.py history --config configs/example-minimal.yaml --from 2026-06-01 --to 2026-06-30
+#   python3 cli.py weekly  --config configs/example-minimal.yaml
+#
+# 字段完整说明见 configs/schema.md
+# ─────────────────────────────────────────────────────────────────────────────
+
+project_name: 示例文献追踪
+output_dir: output
+
+# 标题是否调 DeepL 翻译成中文（需在 .env 配 DEEPL_API_KEY；不配则留空，不报错）
+translate_titles: true
+
+# ── 期刊表 ────────────────────────────────────────────────────────────────────
+# full_inclusion_journals  ：全量收录（配合 fallback_subsection，没命中关键词也收）
+# keyword_filtered_journals：只收标题命中关键词的（绝大多数期刊放这里）
+# 写法：`期刊全名: 显示名`，也可只写一列期刊全名
+full_inclusion_journals:
+  "European heart journal": Eur Heart J
+  "Circulation": Circulation
+
+keyword_filtered_journals:
+  "The New England journal of medicine": NEJM
+  "Lancet (London, England)": Lancet
+  "JAMA": JAMA
+  "Nature medicine": Nat Med
+
+# 报告里期刊的固定展示顺序（可选；未列出的排后面）
+journal_order: [NEJM, Lancet, JAMA, Nat Med, Eur Heart J, Circulation]
+
+# ── 全库检索的质量门槛（只对 scope: pubmed_all 生效）─────────────────────────
+# 需本地有 if_data.json（用自己的 JCR 名单生成，本项目不分发）。缺失时自动跳过。
+allowed_quartiles: [Q1, Q2]
+min_impact_factor: 2
+
+# ── 板块 ──────────────────────────────────────────────────────────────────────
+# 顺序即**去重优先级**：一篇文章只归第一个命中的板块，不会重复出现。
+sections:
+
+  # 例一：cross_product —— 需**同时**命中两侧关键词
+  # 适合「某类药 × 某类结局」这种交叉主题
+  - name: 药物不良反应
+    matcher: cross_product
+    scope: pubmed_all          # 全 PubMed 检索
+    quality_filter: true       # 套用上面的分区/IF 门槛
+    search_field: ti           # ti=仅标题（推荐）｜tiab=标题+摘要（多但杂）
+
+    # AND 的 A 侧：所有子板块共用
+    trigger_keywords:
+      - SGLT2 inhibitor
+      - GLP-1 receptor agonist
+      - sacubitril
+
+    include_types: [Journal Article, Review, Systematic Review, Meta-Analysis, Case Reports]
+    exclude_types: [Editorial, Letter, Comment, Erratum]
+
+    # AND 的 B 侧：写在每个子板块下。顺序即归类优先级（取首个命中者）
+    subsections:
+      - name: 肾脏
+        cross_keywords: [acute kidney injury, nephropathy, renal impairment]
+      - name: 代谢
+        cross_keywords: [ketoacidosis, hypoglycemia, weight loss]
+      - name: 其他
+        cross_keywords: [adverse event, safety, complication]
+
+  # 例二：simple_keyword —— 标题命中任一关键词即收录
+  - name: 心衰进展
+    matcher: simple_keyword
+    scope: journals            # 只在上面列出的期刊里找
+
+    # 还有个 `fallback_subsection: 其他` 选项，作用是把**全量收录刊里没命中关键词的
+    # 文章也全部收进来**（等于全量订阅那几本）。本示例故意不开：一本刊一个月常有几百篇，
+    # 全收会淹没真正命中关键词的那些。确实想全量订阅专科刊时再打开。
+
+    exclude_keywords:          # 命中即排除（可选）
+      - study protocol
+      - correction
+
+    include_types: [Journal Article, Review, Systematic Review]
+    exclude_types: [Editorial, Letter, Comment, Erratum]
+
+    subsections:
+      - name: 射血分数保留
+        keywords: [HFpEF, preserved ejection fraction]
+      - name: 器械与介入
+        keywords: [cardiac resynchronization, left ventricular assist device, TAVR]
+      - name: 其他
+        keywords: []           # 留空＝不主动匹配，仅作兜底
