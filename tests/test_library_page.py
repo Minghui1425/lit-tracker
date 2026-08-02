@@ -77,6 +77,9 @@ def test_citation_badges_and_citer_list(cfg, db, tmp_path):
     assert arts["1"]["citedby"] == ["2"] and arts["1"]["cc"] == 120
     assert arts["2"]["cites"] == ["1"] and arts["2"]["citedby"] == []
     assert "库内被引" in page and "b-cit" in page
+    # 「引用情况」下拉要同时覆盖全球被引区间和库内引用关系
+    for opt in ('value="1-10"', 'value="100-"', 'value="db1"', 'value="db0"'):
+        assert opt in page
 
 
 def test_page_renders_before_citations_ever_ran(cfg, db, tmp_path):

@@ -179,10 +179,16 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
       <option value="2">≥ 2</option><option value="5">≥ 5</option>
       <option value="10">≥ 10</option><option value="20">≥ 20</option>
       <option value="-5">&lt; 5</option></select></div>
-  <div class=grp><label>库内被引</label>
+  <div class=grp><label>引用情况</label>
     <select id=f-cit onchange="apply()"><option value="">全部</option>
-      <option value="1">≥ 1 篇</option><option value="3">≥ 3 篇</option>
-      <option value="0">无</option></select></div>
+      <option value="1-10">被引 1～10</option>
+      <option value="10-30">被引 10～30</option>
+      <option value="30-50">被引 30～50</option>
+      <option value="50-100">被引 50～100</option>
+      <option value="100-">被引 ≥ 100</option>
+      <option value="db1">有库内被引</option>
+      <option value="db3">库内被引 ≥ 3 篇</option>
+      <option value="db0">无库内被引</option></select></div>
 
   <div class=row-break>
     <div class=grp><label>文章类型</label>{type_boxes}</div>
@@ -267,10 +273,15 @@ function apply(){{
       if(isNaN(v)) iOk = false;                       // 无 IF 数据的不计入任何区间
       else iOk = (ifv[0]==='-') ? v < parseFloat(ifv.slice(1)) : v >= parseFloat(ifv);
     }}
+    // 「引用情况」一个下拉管两件事：db* 走库内引用关系，其余是全球被引数的区间
     let cOk = true;
-    if(cit!==''){{
-      const n=(a.citedby||[]).length;
-      cOk = (cit==='0') ? n===0 : n>=parseInt(cit,10);
+    if(cit.slice(0,2)==='db'){{
+      const n=(a.citedby||[]).length, want=parseInt(cit.slice(2),10);
+      cOk = want===0 ? n===0 : n>=want;
+    }} else if(cit){{
+      const cc=a.cc||0, p=cit.split('-');          // 左闭右开 [lo, hi)
+      const lo=parseInt(p[0],10), hi=p[1]?parseInt(p[1],10):Infinity;
+      cOk = cc>=lo && cc<hi;
     }}
     return (!sec||a.sec===sec) && (!sub||a.sub===sub) && (!yr||a.year===yr) &&
            (!mo||a.month===mo) && (!jr||a.journal===jr) && (!tier||a.q===tier) && iOk && cOk &&
