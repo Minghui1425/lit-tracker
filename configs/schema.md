@@ -108,14 +108,142 @@ python3 cli.py validate --config configs/你的配置.yaml   # 联网核对期�
 
 ## 文章类型可用值
 
-`Journal Article` · `Review` · `Systematic Review` · `Meta-Analysis` · `Clinical Trial` · `Randomized Controlled Trial` · `Case Reports` · `Observational Study` · `Multicenter Study` · `Practice Guideline` · `Editorial` · `Letter` · `Comment` · `Erratum`
+下面是**全部**可填的值，不用自己去想。Excel 模板里也有同一张表（「文章类型」页），
+可以直接照抄。「建议」只是默认倾向，按需要改就行。
 
-常见搭配：
+> ⚠️ 英文名必须与 PubMed 一字不差（含大小写与复数）。**写错不会报错，只会静默筛不到**——
+> 所以本表每一条都经过 `"X"[pt]` 实际检索验证。两个最常踩的坑：
+> `Erratum` ✗ →`Published Erratum` ✓；`Case Report` ✗ → `Case Reports` ✓（复数）。
+>
+> 名字里带逗号的（如 `Clinical Trial, Phase III`）在 YAML 的**行内列表**里必须加引号，
+> 否则 `[A, Clinical Trial, Phase III]` 会被当成三项——用下面的块状写法就不会有这个问题。
+
+| 类型 | 中文 | 建议 |
+|---|---|---|
+| `Journal Article` | 期刊论文（绝大多数研究都带这个） | 保留 |
+| `Randomized Controlled Trial` | 随机对照试验 | 保留 |
+| `Controlled Clinical Trial` | 对照临床试验（非随机） | 保留 |
+| `Clinical Trial` | 临床试验（未分期的统称） | 保留 |
+| `Clinical Trial, Phase I` | I 期临床试验 | 保留 |
+| `Clinical Trial, Phase II` | II 期临床试验 | 保留 |
+| `Clinical Trial, Phase III` | III 期临床试验 | 保留 |
+| `Clinical Trial, Phase IV` | IV 期临床试验（上市后） | 保留 |
+| `Pragmatic Clinical Trial` | 实用性临床试验 | 保留 |
+| `Adaptive Clinical Trial` | 适应性设计试验 | 保留 |
+| `Equivalence Trial` | 等效性试验 | 保留 |
+| `Observational Study` | 观察性研究（队列/病例对照等） | 保留 |
+| `Comparative Study` | 比较性研究 | 保留 |
+| `Multicenter Study` | 多中心研究 | 保留 |
+| `Evaluation Study` | 评价性研究 | 保留 |
+| `Validation Study` | 验证性研究 | 保留 |
+| `Twin Study` | 双生子研究 | 保留 |
+| `Clinical Study` | 临床研究（较旧的统称） | 保留 |
+| `Technical Report` | 技术报告 | 视情况 |
+| `Review` | 综述（含叙述性综述，量很大） | 保留 |
+| `Systematic Review` | 系统综述 | 保留 |
+| `Meta-Analysis` | 荟萃分析 | 保留 |
+| `Scoping Review` | 范围综述 | 保留 |
+| `Evidence Synthesis` | 证据合成 | 保留 |
+| `Practice Guideline` | 临床实践指南 | 保留 |
+| `Guideline` | 指南（范围更宽） | 保留 |
+| `Consensus Statement` | 共识声明 | 保留 |
+| `Consensus Development Conference, NIH` | NIH 共识会议 | 视情况 |
+| `Case Reports` | 病例报告（注意是复数） | 视情况 |
+| `Clinical Trial Protocol` | 试验方案（只有设计，没有结果） | 视情况 |
+| `Preprint` | 预印本（未经同行评议） | 视情况 |
+| `Dataset` | 数据集 | 视情况 |
+| `English Abstract` | 非英文原文但有英文摘要 | 视情况 |
+| `Historical Article` | 医学史类 | 视情况 |
+| `Introductory Journal Article` | 专题导读 | 视情况 |
+| `Personal Narrative` | 个人叙事 | 视情况 |
+| `Editorial` | 社论 | 排除 |
+| `Letter` | 读者来信 | 排除 |
+| `Comment` | 评论（对某篇文章的点评） | 排除 |
+| `News` | 新闻报道 | 排除 |
+| `Newspaper Article` | 报纸文章 | 排除 |
+| `Interview` | 访谈 | 排除 |
+| `Biography` | 人物传记 | 排除 |
+| `Autobiography` | 自传 | 排除 |
+| `Portrait` | 人物照片/小传 | 排除 |
+| `Address` | 演讲致辞 | 排除 |
+| `Lecture` | 讲座 | 排除 |
+| `Congress` | 会议文集（多为摘要） | 排除 |
+| `Overall` | 会议合集的总条目 | 排除 |
+| `Bibliography` | 文献目录 | 排除 |
+| `Directory` | 名录 | 排除 |
+| `Festschrift` | 纪念文集 | 排除 |
+| `Patient Education Handout` | 患者教育材料 | 排除 |
+| `Video-Audio Media` | 视听资料 | 排除 |
+| `Webcast` | 网络视频 | 排除 |
+| `Legal Case` | 法律案例 | 排除 |
+| `Published Erratum` | 勘误声明（不是 Erratum！） | 排除 |
+| `Retraction Notice` | 撤稿声明 | 排除 |
+| `Retracted Publication` | 已被撤稿的原文——务必排除 | 排除 |
+| `Expression of Concern` | 关注声明（结果存疑） | 排除 |
+| `Corrected and Republished Article` | 更正后重新发表 | 视情况 |
+| `Duplicate Publication` | 重复发表 | 排除 |
+
+### 直接可用的两串
+
+按上表「建议」整理好的完整清单，复制粘贴即可：
 
 ```yaml
-include_types: [Journal Article, Review, Systematic Review, Meta-Analysis, Case Reports]
-exclude_types: [Editorial, Letter, Comment, Erratum]
+include_types:
+  - Journal Article
+  - Randomized Controlled Trial
+  - Controlled Clinical Trial
+  - Clinical Trial
+  - "Clinical Trial, Phase I"
+  - "Clinical Trial, Phase II"
+  - "Clinical Trial, Phase III"
+  - "Clinical Trial, Phase IV"
+  - Pragmatic Clinical Trial
+  - Adaptive Clinical Trial
+  - Equivalence Trial
+  - Observational Study
+  - Comparative Study
+  - Multicenter Study
+  - Evaluation Study
+  - Validation Study
+  - Twin Study
+  - Clinical Study
+  - Review
+  - Systematic Review
+  - Meta-Analysis
+  - Scoping Review
+  - Evidence Synthesis
+  - Practice Guideline
+  - Guideline
+  - Consensus Statement
+exclude_types:
+  - Editorial
+  - Letter
+  - Comment
+  - News
+  - Newspaper Article
+  - Interview
+  - Biography
+  - Autobiography
+  - Portrait
+  - Address
+  - Lecture
+  - Congress
+  - Overall
+  - Bibliography
+  - Directory
+  - Festschrift
+  - Patient Education Handout
+  - Video-Audio Media
+  - Webcast
+  - Legal Case
+  - Published Erratum
+  - Retraction Notice
+  - Retracted Publication
+  - Expression of Concern
+  - Duplicate Publication
 ```
+
+想更宽松就把 `include_types` 整段删掉（留空＝不限类型），只保留 `exclude_types`。
 
 ---
 

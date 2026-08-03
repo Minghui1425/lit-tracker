@@ -55,8 +55,63 @@ sections:
       - GLP-1 receptor agonist
       - sacubitril
 
-    include_types: [Journal Article, Review, Systematic Review, Meta-Analysis, Case Reports]
-    exclude_types: [Editorial, Letter, Comment, Erratum]
+    # 下面两串是「建议保留 / 建议排除」的完整清单，直接可用。
+    # 全表见 configs/schema.md，或 Excel 模板的「文章类型」页照抄。
+    # 注意：名字带逗号的（Clinical Trial, Phase I）在 YAML 里必须加引号。
+    include_types:
+      - Journal Article
+      - Randomized Controlled Trial
+      - Controlled Clinical Trial
+      - Clinical Trial
+      - "Clinical Trial, Phase I"
+      - "Clinical Trial, Phase II"
+      - "Clinical Trial, Phase III"
+      - "Clinical Trial, Phase IV"
+      - Pragmatic Clinical Trial
+      - Adaptive Clinical Trial
+      - Equivalence Trial
+      - Observational Study
+      - Comparative Study
+      - Multicenter Study
+      - Evaluation Study
+      - Validation Study
+      - Twin Study
+      - Clinical Study
+      - Review
+      - Systematic Review
+      - Meta-Analysis
+      - Scoping Review
+      - Evidence Synthesis
+      - Practice Guideline
+      - Guideline
+      - Consensus Statement
+      - Case Reports
+    exclude_types:
+      - Editorial
+      - Letter
+      - Comment
+      - News
+      - Newspaper Article
+      - Interview
+      - Biography
+      - Autobiography
+      - Portrait
+      - Address
+      - Lecture
+      - Congress
+      - Overall
+      - Bibliography
+      - Directory
+      - Festschrift
+      - Patient Education Handout
+      - Video-Audio Media
+      - Webcast
+      - Legal Case
+      - Published Erratum
+      - Retraction Notice
+      - Retracted Publication
+      - Expression of Concern
+      - Duplicate Publication
 
     # AND 的 B 侧：写在每个子板块下。顺序即归类优先级（取首个命中者）
     subsections:
@@ -80,8 +135,59 @@ sections:
       - study protocol
       - correction
 
-    include_types: [Journal Article, Review, Systematic Review]
-    exclude_types: [Editorial, Letter, Comment, Erratum]
+    include_types:
+      - Journal Article
+      - Randomized Controlled Trial
+      - Controlled Clinical Trial
+      - Clinical Trial
+      - "Clinical Trial, Phase I"
+      - "Clinical Trial, Phase II"
+      - "Clinical Trial, Phase III"
+      - "Clinical Trial, Phase IV"
+      - Pragmatic Clinical Trial
+      - Adaptive Clinical Trial
+      - Equivalence Trial
+      - Observational Study
+      - Comparative Study
+      - Multicenter Study
+      - Evaluation Study
+      - Validation Study
+      - Twin Study
+      - Clinical Study
+      - Review
+      - Systematic Review
+      - Meta-Analysis
+      - Scoping Review
+      - Evidence Synthesis
+      - Practice Guideline
+      - Guideline
+      - Consensus Statement
+    exclude_types:
+      - Editorial
+      - Letter
+      - Comment
+      - News
+      - Newspaper Article
+      - Interview
+      - Biography
+      - Autobiography
+      - Portrait
+      - Address
+      - Lecture
+      - Congress
+      - Overall
+      - Bibliography
+      - Directory
+      - Festschrift
+      - Patient Education Handout
+      - Video-Audio Media
+      - Webcast
+      - Legal Case
+      - Published Erratum
+      - Retraction Notice
+      - Retracted Publication
+      - Expression of Concern
+      - Duplicate Publication
 
     subsections:
       - name: 射血分数保留

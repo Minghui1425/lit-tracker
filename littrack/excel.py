@@ -18,10 +18,12 @@ try:
 except ImportError:                                    # pragma: no cover
     raise SystemExit("缺少依赖 openpyxl，请先运行：pip3 install -r requirements.txt")
 
+from . import config as cfgmod
 from .config import MATCHERS, ConfigError, _VALID_PUB_TYPES
 
 SHEETS = ("设置", "板块", "子板块", "期刊")
 GUIDE = "说明"          # 首页说明，不参与解析
+TYPES_SHEET = "文章类型"  # 类型对照表，供用户照抄，不参与解析
 
 _HDR_FILL = PatternFill("solid", fgColor="2F5597")
 _NOTE_FILL = PatternFill("solid", fgColor="FFF6DA")
@@ -59,8 +61,8 @@ _COLS: dict[str, list[tuple[str, int, str]]] = {
         ("质量过滤", 11, "按「设置」页的分区/IF 筛，仅「全库」有效"),
         ("触发词", 38, "只有「交叉」才填；选「关键词」时留空"),
         ("排除词", 26, "标题命中即排除，可留空"),
-        ("保留类型", 38, "留空＝不限"),
-        ("排除类型", 26, "常填 Editorial,Letter,Comment,Erratum"),
+        ("保留类型", 44, "留空＝不限。照抄「文章类型」页，别自己拼写"),
+        ("排除类型", 44, "照抄「文章类型」页；示例行已按建议填好，可直接用"),
         ("兜底子板块", 14, "配合「全量」收录的刊，可留空"),
     ],
     "子板块": [
@@ -127,6 +129,15 @@ _GUIDE_TEXT = [
     ("p", "· 词组照常写：acute kidney injury"),
     ("p", "· 多个词用逗号或换行分隔都行，中英文逗号都认"),
     ("", ""),
+    ("h", "「保留类型」和「排除类型」怎么填"),
+    ("p", "不用自己想有哪些类型——翻到「文章类型」页，整表都在那里，照抄即可。"),
+    ("p", "那一页第三列写了建议：保留 / 排除 / 视情况，示例行就是按这个建议预填的。"),
+    ("p", "· 保留类型：留空＝不限。填了就只收命中其一的文章"),
+    ("p", "· 排除类型：命中任一个就丢掉，优先级高于「保留类型」"),
+    ("p", "· 名字必须和 PubMed 一字不差，写错不会报错、只会静默筛不到——所以别手打"),
+    ("p", "　　常见错法：Erratum ✗（正确是 Published Erratum）、Case Report ✗（要复数 Case Reports）"),
+    ("p", "· 带逗号的类型（如 Clinical Trial, Phase III）直接填，程序认得，不会被逗号切开"),
+    ("", ""),
     ("h", "两个顺序的含义"),
     ("p", "板块顺序　：一篇文章只归**第一个**命中的板块，不会重复出现。最专的写前面。"),
     ("p", "子板块顺序：取**第一个**命中的子板块。更具体的写前面——"),
@@ -186,6 +197,49 @@ def _write_guide(ws):
     ws.cell(1, 1).font = Font(bold=True, size=15, color="2F5597", scheme="minor")
 
 
+def _sample_types(advice: str) -> str:
+    """示例行里预填的类型串。直接取总表里标了该建议的全部类型——
+    用户拿到手就是能用的完整清单，不必自己想「还有哪些该排除」。"""
+    return ", ".join(cfgmod.default_types(advice))
+
+
+def _write_types(ws):
+    """文章类型对照表。不参与解析，纯粹给用户照抄，省得凭印象拼写。"""
+    ws.sheet_view.showGridLines = False
+    title = ws.cell(1, 1, "PubMed 文章类型对照表——填「保留类型 / 排除类型」时照抄这里")
+    title.font = Font(bold=True, size=14, color="2F5597", scheme="minor")
+    for r, text in enumerate([
+            "英文名必须一字不差（含大小写与复数），写错不会报错，只会静默筛不到东西。",
+            "「建议」一列只是默认倾向，按自己需要调整即可；模板示例行就是按它预填的。",
+            "带逗号的类型（Clinical Trial, Phase III）可以直接填，程序不会从逗号处切开。"], start=2):
+        c = ws.cell(r, 1, text)
+        c.font = Font(size=10, color="8A6D1B", scheme="minor")
+
+    head_row = 6
+    thin = Side(style="thin", color="C8D2DE")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for i, (name, width) in enumerate(
+            (("类型（英文，照抄）", 40), ("中文", 34), ("建议", 10)), 1):
+        h = ws.cell(head_row, i, name)
+        h.font, h.fill, h.border = _HDR_FONT, _HDR_FILL, border
+        h.alignment = Alignment(vertical="center", horizontal="center")
+        ws.column_dimensions[get_column_letter(i)].width = width
+    ws.row_dimensions[head_row].height = 24
+
+    fills = {"保留": PatternFill("solid", fgColor="E8F5E9"),
+             "排除": PatternFill("solid", fgColor="FDECE8"),
+             "视情况": PatternFill("solid", fgColor="FFF8E1")}
+    for r, (en, zh, advice) in enumerate(cfgmod.PUB_TYPES, start=head_row + 1):
+        for i, val in enumerate((en, zh, advice), 1):
+            c = ws.cell(r, i, val)
+            c.border = border
+            c.font = Font(size=10.5, scheme="minor")
+            c.alignment = Alignment(vertical="center")
+        ws.cell(r, 3).fill = fills[advice]
+        ws.cell(r, 3).alignment = Alignment(horizontal="center", vertical="center")
+    ws.freeze_panes = f"A{head_row + 1}"
+
+
 def write_template(path: str | Path, rows: int = 200) -> Path:
     """生成空白 Excel 模板：首页说明 + 4 张数据表（带下拉选项与示例行）。"""
     from openpyxl.worksheet.datavalidation import DataValidation
@@ -194,6 +248,7 @@ def write_template(path: str | Path, rows: int = 200) -> Path:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     _write_guide(wb.create_sheet(GUIDE))
+    _write_types(wb.create_sheet(TYPES_SHEET))
 
     thin = Side(style="thin", color="C8D2DE")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -203,10 +258,9 @@ def write_template(path: str | Path, rows: int = 200) -> Path:
         "板块": [
             [1, "药物不良反应", "交叉", "全库", "标题", "是",
              "SGLT2 inhibitor, GLP-1 receptor agonist", "",
-             "Journal Article, Review, Case Reports",
-             "Editorial, Letter, Comment, Erratum", ""],
+             _sample_types("保留"), _sample_types("排除"), ""],
             [2, "心衰进展", "关键词", "期刊", "标题", "否", "", "study protocol",
-             "Journal Article, Review", "Editorial, Letter", ""],
+             _sample_types("保留"), _sample_types("排除"), ""],
         ],
         "子板块": [
             ["药物不良反应", 1, "肾脏", "acute kidney injury, nephropathy"],
@@ -282,6 +336,27 @@ def _split(val) -> list[str]:
         return []
     parts = re.split(r"[,，;；\n]+", str(val))
     return [p.strip() for p in parts if p.strip()]
+
+
+# 名字里本来就带逗号的文章类型（Clinical Trial, Phase III）。直接按逗号切会被腰斩成
+# 「Clinical Trial」和「Phase III」——前者是个合法但更宽的类型，于是筛选范围被悄悄放大。
+_COMMA_TYPES = sorted((t for t in cfgmod._VALID_PUB_TYPES if "," in t), key=len, reverse=True)
+
+
+def _split_types(val) -> list[str]:
+    """按类型列切分：先把带逗号的类型名占位保护起来，再走通用切分。"""
+    if val is None:
+        return []
+    s = str(val)
+    marks = {}
+    for i, t in enumerate(_COMMA_TYPES):
+        # 大小写不敏感地找出来，保护成占位符；还原时用表里的规范写法
+        for m in re.finditer(re.escape(t), s, re.IGNORECASE):
+            key = f"\x00{i}\x00"
+            s = s[:m.start()] + key + s[m.end():]
+            marks[key] = t
+            break
+    return [marks.get(p, p) for p in _split(s)]
 
 
 def _bool(val, default=False, *, where: str = "", field: str = "") -> bool:
@@ -450,7 +525,9 @@ def read_excel(path: str | Path) -> dict:
             sec["quality_filter"] = True
         for key, col in (("trigger_keywords", "触发词"), ("exclude_keywords", "排除词"),
                          ("include_types", "保留类型"), ("exclude_types", "排除类型")):
-            vals = _split(row.get(col))
+            # 类型列走专用切分：类型名本身可能含逗号
+            splitter = _split_types if col.endswith("类型") else _split
+            vals = splitter(row.get(col))
             if vals:
                 sec[key] = vals
         fb = str(row.get("兜底子板块") or "").strip()

@@ -463,6 +463,8 @@ def main():
               f"    第 1 行列名、第 2 行填写提示（别删）、第 3 行起填内容\n"
               f"    带下拉箭头的格子直接选，不用手打\n"
               f"    模板自带示例行，照着改或删掉重填都行\n\n"
+              f"  「保留类型 / 排除类型」两列不用自己想：「{excel.TYPES_SHEET}」页列了\n"
+              f"  全部 {len(excel._VALID_PUB_TYPES)} 种 PubMed 类型和中文对照，示例行已按建议预填。\n\n"
               f"  填好后运行：python3 cli.py from-excel --excel {p.name}")
         return
 

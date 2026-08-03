@@ -98,6 +98,7 @@ copy .env.example .env
 ```bash
 python3 cli.py template --out 我的配置.xlsx     # 生成模板
 # 打开后先看第一页「说明」，再填 4 张表：设置 / 板块 / 子板块 / 期刊
+# 「文章类型」页列了全部 62 种 PubMed 类型与中文对照，填「保留/排除类型」时照抄即可
 python3 cli.py from-excel --excel 我的配置.xlsx  # 转成 YAML
 ```
 

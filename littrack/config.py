@@ -23,12 +23,94 @@ class ConfigError(Exception):
 # （如判断器官词其实指癌种、区分强弱实体词），难以配置化，故不对外开放。
 MATCHERS = ("simple_keyword", "cross_product")
 
-_VALID_PUB_TYPES = {
-    "Journal Article", "Review", "Systematic Review", "Meta-Analysis",
-    "Clinical Trial", "Randomized Controlled Trial", "Case Reports",
-    "Editorial", "Letter", "Comment", "Erratum", "Practice Guideline",
-    "Observational Study", "Multicenter Study",
-}
+# ── PubMed 文章类型总表 ───────────────────────────────────────────────────────
+# (英文名, 中文, 建议) —— 建议 ∈ 保留 / 排除 / 视情况，只是给用户的默认倾向，不强制。
+#
+# 英文名必须与 PubMed XML 里 <PublicationType> 的写法**逐字一致**，否则筛选静默失效。
+# 本表每一条都拿 `"X"[pt]` 实际检索验证过，不是凭印象写的。踩过的坑：
+#   · Erratum ✗ → Published Erratum ✓      （旧版示例配置里写的就是 Erratum，从未生效）
+#   · Retraction of Publication ✗ → Retraction Notice ✓（撤稿声明本身）
+#     另有 Retracted Publication ✓，指「被撤掉的那篇原文」，两者不是一回事
+# 带逗号的类型（Clinical Trial, Phase III）在 Excel 里也能正常填，见 excel.py 的切分逻辑。
+PUB_TYPES: list[tuple[str, str, str]] = [
+    # —— 原始研究 ——
+    ("Journal Article",             "期刊论文（绝大多数研究都带这个）", "保留"),
+    ("Randomized Controlled Trial", "随机对照试验",                     "保留"),
+    ("Controlled Clinical Trial",   "对照临床试验（非随机）",           "保留"),
+    ("Clinical Trial",              "临床试验（未分期的统称）",         "保留"),
+    ("Clinical Trial, Phase I",     "I 期临床试验",                     "保留"),
+    ("Clinical Trial, Phase II",    "II 期临床试验",                    "保留"),
+    ("Clinical Trial, Phase III",   "III 期临床试验",                   "保留"),
+    ("Clinical Trial, Phase IV",    "IV 期临床试验（上市后）",          "保留"),
+    ("Pragmatic Clinical Trial",    "实用性临床试验",                   "保留"),
+    ("Adaptive Clinical Trial",     "适应性设计试验",                   "保留"),
+    ("Equivalence Trial",           "等效性试验",                       "保留"),
+    ("Observational Study",         "观察性研究（队列/病例对照等）",    "保留"),
+    ("Comparative Study",           "比较性研究",                       "保留"),
+    ("Multicenter Study",           "多中心研究",                       "保留"),
+    ("Evaluation Study",            "评价性研究",                       "保留"),
+    ("Validation Study",            "验证性研究",                       "保留"),
+    ("Twin Study",                  "双生子研究",                       "保留"),
+    ("Clinical Study",              "临床研究（较旧的统称）",           "保留"),
+    ("Technical Report",            "技术报告",                         "视情况"),
+    # —— 综述与证据合成 ——
+    ("Review",                      "综述（含叙述性综述，量很大）",     "保留"),
+    ("Systematic Review",           "系统综述",                         "保留"),
+    ("Meta-Analysis",               "荟萃分析",                         "保留"),
+    ("Scoping Review",              "范围综述",                         "保留"),
+    ("Evidence Synthesis",          "证据合成",                         "保留"),
+    # —— 指南与共识 ——
+    ("Practice Guideline",          "临床实践指南",                     "保留"),
+    ("Guideline",                   "指南（范围更宽）",                 "保留"),
+    ("Consensus Statement",         "共识声明",                         "保留"),
+    ("Consensus Development Conference, NIH", "NIH 共识会议",           "视情况"),
+    # —— 视情况 ——
+    ("Case Reports",                "病例报告（注意是复数）",           "视情况"),
+    ("Clinical Trial Protocol",     "试验方案（只有设计，没有结果）",   "视情况"),
+    ("Preprint",                    "预印本（未经同行评议）",           "视情况"),
+    ("Dataset",                     "数据集",                           "视情况"),
+    ("English Abstract",            "非英文原文但有英文摘要",           "视情况"),
+    ("Historical Article",          "医学史类",                         "视情况"),
+    ("Introductory Journal Article", "专题导读",                        "视情况"),
+    ("Personal Narrative",          "个人叙事",                         "视情况"),
+    # —— 通常排除：非研究性内容 ——
+    ("Editorial",                   "社论",                             "排除"),
+    ("Letter",                      "读者来信",                         "排除"),
+    ("Comment",                     "评论（对某篇文章的点评）",         "排除"),
+    ("News",                        "新闻报道",                         "排除"),
+    ("Newspaper Article",           "报纸文章",                         "排除"),
+    ("Interview",                   "访谈",                             "排除"),
+    ("Biography",                   "人物传记",                         "排除"),
+    ("Autobiography",               "自传",                             "排除"),
+    ("Portrait",                    "人物照片/小传",                    "排除"),
+    ("Address",                     "演讲致辞",                         "排除"),
+    ("Lecture",                     "讲座",                             "排除"),
+    ("Congress",                    "会议文集（多为摘要）",             "排除"),
+    ("Overall",                     "会议合集的总条目",                 "排除"),
+    ("Bibliography",                "文献目录",                         "排除"),
+    ("Directory",                   "名录",                             "排除"),
+    ("Festschrift",                 "纪念文集",                         "排除"),
+    ("Patient Education Handout",   "患者教育材料",                     "排除"),
+    ("Video-Audio Media",           "视听资料",                         "排除"),
+    ("Webcast",                     "网络视频",                         "排除"),
+    ("Legal Case",                  "法律案例",                         "排除"),
+    # —— 通常排除：勘误与撤稿 ——
+    ("Published Erratum",           "勘误声明（不是 Erratum！）",       "排除"),
+    ("Retraction Notice",           "撤稿声明",                         "排除"),
+    ("Retracted Publication",       "已被撤稿的原文——务必排除",        "排除"),
+    ("Expression of Concern",       "关注声明（结果存疑）",             "排除"),
+    ("Corrected and Republished Article", "更正后重新发表",             "视情况"),
+    ("Duplicate Publication",       "重复发表",                         "排除"),
+]
+
+_VALID_PUB_TYPES = {t for t, _, _ in PUB_TYPES}
+# 小写 → 规范写法，用于纠正大小写（用户写 journal article 也认）
+_PUB_TYPE_CANON = {t.lower(): t for t in _VALID_PUB_TYPES}
+
+
+def default_types(advice: str) -> list[str]:
+    """按建议取一组类型，供模板与示例配置预填，省得用户自己想。"""
+    return [t for t, _, a in PUB_TYPES if a == advice]
 
 
 @dataclass
@@ -128,12 +210,32 @@ def _as_str_list(val, where: str, key: str) -> list[str]:
     return out
 
 
-def _check_types(types: list[str], where: str, key: str):
-    unknown = [t for t in types if t not in _VALID_PUB_TYPES]
+def _check_types(types: list[str], where: str, key: str) -> list[str]:
+    """校验并规范化文章类型，返回改好大小写的列表。
+
+    类型名写错不会报错，只会**静默筛不到东西**——所以这里必须拦住，
+    而且要直接给出最接近的正确写法，不能只甩一张几十项的表让人自己找。
+    """
+    import difflib
+
+    out, unknown = [], []
+    for t in types:
+        canon = _PUB_TYPE_CANON.get(t.strip().lower())
+        if canon:
+            out.append(canon)
+        else:
+            unknown.append(t)
     if unknown:
+        lines = []
+        for t in unknown:
+            near = difflib.get_close_matches(t, sorted(_VALID_PUB_TYPES), n=3, cutoff=0.6)
+            lines.append(f"  · {t!r}" + (f"　你是不是想写：{' / '.join(near)}" if near else ""))
         raise ConfigError(
-            f"{where} 的 `{key}` 含 PubMed 不认识的文章类型：{unknown}\n"
-            f"  可用值：{', '.join(sorted(_VALID_PUB_TYPES))}")
+            f"{where} 的 `{key}` 含 PubMed 不认识的文章类型：\n" + "\n".join(lines) +
+            f"\n  完整可用值见 configs/schema.md，或用 Excel 模板的「文章类型」页照抄。\n"
+            f"  注意几个常写错的：Erratum ✗ → Published Erratum ✓；"
+            f"Case Report ✗ → Case Reports ✓（复数）")
+    return out
 
 
 def _parse_section(raw: dict, idx: int) -> Section:
@@ -203,8 +305,8 @@ def _parse_section(raw: dict, idx: int) -> Section:
 
     inc = _as_str_list(raw.get("include_types", []), where, "include_types") if raw.get("include_types") else []
     exc = _as_str_list(raw.get("exclude_types", []), where, "exclude_types") if raw.get("exclude_types") else []
-    _check_types(inc, where, "include_types")
-    _check_types(exc, where, "exclude_types")
+    inc = _check_types(inc, where, "include_types")
+    exc = _check_types(exc, where, "exclude_types")
     both = set(inc) & set(exc)
     if both:
         raise ConfigError(f"{where} 的文章类型同时出现在 include 与 exclude：{sorted(both)}")
