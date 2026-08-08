@@ -19,7 +19,7 @@
 收藏库（存下看中的文献，网页可评级/写笔记/按课题分组）：
     python3 cli.py add       --config configs/我的配置.yaml --pmid 42482656
     python3 cli.py library   --config configs/我的配置.yaml   # 生成收藏库网页
-    python3 cli.py serve     --config configs/我的配置.yaml   # 网页按钮的后端，保持开着
+    python3 cli.py serve     --config configs/我的配置.yaml   # 网页按钮的后端（含网页上「添加文献」），保持开着
     python3 cli.py citations --config configs/我的配置.yaml   # 算库内引用关系与被引数
 """
 from __future__ import annotations
@@ -172,6 +172,16 @@ def _mark_ran(out_dir: Path, tag: str) -> None:
         logging.warning(f"写运行标记失败（不影响本次结果，但下次 --catchup 会重跑）：{e}")
 
 
+_JRN_CACHE: list = []
+
+
+def _jrn_index():
+    """if_data.json 有几 MB，serve 每来一个请求都重读太浪费，进程内缓存一份。"""
+    if not _JRN_CACHE:
+        _JRN_CACHE.append(JournalIndex.load(BASE / "if_data.json"))
+    return _JRN_CACHE[0]
+
+
 def _vault() -> Path | None:
     d = os.environ.get("OBSIDIAN_DIR", "").strip()
     return Path(d).expanduser() if d else None
@@ -306,7 +316,8 @@ def _serve(cfg, db_path: Path, idx_path: Path):
             raw = self._body_bytes()          # 先读干净，无论后面放行还是拒绝
             if not self._host_ok():
                 self._reject_host(); return
-            routes = ("/rating", "/note", "/delete", "/project/add", "/project/remove",
+            routes = ("/rating", "/note", "/delete", "/article/add",
+                      "/project/add", "/project/remove",
                       "/obsidian/export", "/obsidian/refresh")
             if self.path not in routes:
                 self.send_response(404); self.end_headers(); return
@@ -323,6 +334,18 @@ def _serve(cfg, db_path: Path, idx_path: Path):
                     res = {"ok": True}
                 elif self.path == "/delete":
                     res = {"deleted": library.delete(db_path, d.get("pmids", []))}
+                elif self.path == "/article/add":
+                    from littrack import intake
+                    if not os.environ.get("NCBI_API_KEY"):
+                        raise ValueError("未设置 NCBI_API_KEY，无法向 PubMed 取数据。\n"
+                                         "请在项目根目录的 .env 里写入 NCBI_API_KEY=你的密钥，"
+                                         "然后重启本服务。")
+                    pmids = intake.resolve(d.get("query", ""))
+                    r = intake.collect(cfg, db_path, pmids, journals=_jrn_index(),
+                                       section=(d.get("section") or "").strip(),
+                                       subsection=(d.get("subsection") or "").strip(),
+                                       translate=_translate)
+                    res = {k: r[k] for k in ("added", "updated", "existing", "missing")}
                 elif self.path.startswith("/obsidian/"):
                     root = _vault()
                     if not root:
@@ -504,32 +527,26 @@ def main():
         if not args.pmid:
             ap.error("add 需要 --pmid，例：--pmid 42031428 42482656")
         _require_key()
-        from littrack import entrez, library, matchers
-        from littrack.journals import JournalIndex
+        from littrack import intake
         idx = JournalIndex.load(BASE / "if_data.json")
-        arts = entrez.efetch([str(p) for p in args.pmid])
-        if not arts:
-            print("PubMed 未返回任何文献，请检查 PMID 是否正确", file=sys.stderr)
+        try:
+            pmids = intake.parse_pmids([str(p) for p in args.pmid])
+            res = intake.collect(cfg, db_path, pmids, journals=idx,
+                                 section=args.section or "",
+                                 subsection=args.subsection or "",
+                                 translate=_translate)
+        except intake.IntakeError as e:
+            print(e, file=sys.stderr)
             sys.exit(1)
-        for a in arts:
-            hit = matchers.classify(cfg, a["title"])
-            a["section"], a["subsection"] = hit if hit else (args.section or "", args.subsection or "")
-            if args.section:
-                a["section"] = args.section
-            if args.subsection:
-                a["subsection"] = args.subsection
-            a["journal"] = idx.display_name(a["journal_full"] or a["journal_abbr"],
-                                            cfg.all_journals)
-            a["if_value"], a["quartile"] = idx.impact(a)
-            a["type_label"] = matchers.type_label(a["pub_types"])
-        _translate(cfg, arts)
-        added, updated = library.upsert(db_path, arts)
+        arts, added, updated = res["articles"], res["added"], res["updated"]
         from littrack import library_page
         library_page.render(cfg, db_path, idx_path, port=_port(),
                             token=_token(db_path.parent))
         print(f"✓ 新增 {added} 篇"
               + (f"，更新 {updated} 篇（已在库中，已按当前配置重新归类；"
                  f"你的笔记与评级保留）" if updated else ""))
+        if res["missing"]:
+            print(f"    PubMed 没有这些 PMID：{'、'.join(res['missing'])}")
         unmatched = []
         for a in arts:
             if a["section"]:
