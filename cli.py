@@ -359,11 +359,14 @@ def _serve(cfg, db_path: Path, idx_path: Path):
                                          "请在项目根目录的 .env 里写入 NCBI_API_KEY=你的密钥，"
                                          "然后重启本服务。")
                     pmids = intake.resolve(d.get("query", ""))
+                    # 网页这条路默认顺手试抓全文：点一次按钮就该把该做的都做了，
+                    # 用页面的人手边没有终端可以再补一条 pdf --fetch
                     r = intake.collect(cfg, db_path, pmids, journals=_jrn_index(),
                                        section=(d.get("section") or "").strip(),
                                        subsection=(d.get("subsection") or "").strip(),
-                                       translate=_translate)
-                    res = {k: r[k] for k in ("added", "updated", "existing", "missing")}
+                                       translate=_translate, fetch_pdf=True)
+                    res = {k: r[k] for k in ("added", "updated", "existing",
+                                             "missing", "pdf_fetched")}
                 elif self.path.startswith("/pdf/"):
                     from littrack import pdfs
                     pdf_dir = pdfs.dir_for(db_path)
@@ -476,7 +479,8 @@ def main():
     ap.add_argument("--all", action="store_true", help="obsidian：导出库中全部文献")
     # pdf 子命令（--add / --delete / --pmid 与上面共用）
     ap.add_argument("--fetch", action="store_true",
-                    help="pdf：抓 OA 全文（PMC / Unpaywall），不带 --pmid 就补全库里缺的")
+                    help="pdf：抓 OA 全文（PMC / Unpaywall），不带 --pmid 就补全库里缺的；"
+                         "add：新收的顺手试抓一次全文（网页上的「添加文献」一律会试）")
     ap.add_argument("--import", dest="imp", metavar="目录",
                     help="pdf：把一个文件夹里的 PDF 按 DOI/标题认领进库")
     ap.add_argument("--move", action="store_true",
@@ -594,7 +598,7 @@ def main():
             res = intake.collect(cfg, db_path, pmids, journals=idx,
                                  section=args.section or "",
                                  subsection=args.subsection or "",
-                                 translate=_translate)
+                                 translate=_translate, fetch_pdf=args.fetch)
         except intake.IntakeError as e:
             print(e, file=sys.stderr)
             sys.exit(1)
@@ -607,6 +611,9 @@ def main():
                  f"你的笔记与评级保留）" if updated else ""))
         if res["missing"]:
             print(f"    PubMed 没有这些 PMID：{'、'.join(res['missing'])}")
+        if args.fetch and added:
+            print(f"    其中 {res['pdf_fetched']} 篇已自动挂上 OA 全文"
+                  + ("" if res["pdf_fetched"] else "（订阅刊没有 OA 版本，需自行下载）"))
         unmatched = []
         for a in arts:
             if a["section"]:

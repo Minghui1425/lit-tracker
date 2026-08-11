@@ -6,10 +6,13 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 from . import entrez, library, matchers
+
+log = logging.getLogger(__name__)
 
 # 一次最多收多少篇。限制的是网页那条路：输入框里粘一大段数字很容易手滑，
 # 而每个 PMID 都要走 PubMed，几百个一次会把请求拖到超时。
@@ -107,10 +110,11 @@ def check_section(config, section: str, subsection: str) -> None:
 
 
 def collect(config, db_path: Path, pmids: list[str], *, journals,
-            section: str = "", subsection: str = "", translate=None) -> dict:
-    """抓元数据 → 归板块 → 写库。
+            section: str = "", subsection: str = "", translate=None,
+            fetch_pdf: bool = False) -> dict:
+    """抓元数据 → 归板块 → 写库 →（可选）顺手试一次免费全文。
 
-    返回 {"articles", "added", "updated", "existing", "missing"}：
+    返回 {"articles", "added", "updated", "existing", "missing", "pdf_fetched"}：
       existing 是本次之前就在库里的（会按当前配置重新归类，笔记与评级保留），
       missing  是 PubMed 没返回的（PMID 写错或已被撤下）。
     """
@@ -138,5 +142,21 @@ def collect(config, db_path: Path, pmids: list[str], *, journals,
         translate(config, arts)
 
     added, updated = library.upsert(db_path, arts)
+
+    # 新入库的顺手试一次免费全文：能拿到就直接挂上，省得事后再点一次「抓取 OA 全文」。
+    # 只试**这次新增**的——已在库的要么早有 PDF，要么之前就试过没拿到，重试一遍多半
+    # 还是白等。抓不到是常态（订阅刊），所以这里的任何失败都吞掉：全文是附加品，
+    # 绝不能让它把「文献已经收进来了」这件事搞成一次失败。
+    pdf_fetched = 0
+    if fetch_pdf:
+        fresh = [a for a in arts if a["pmid"] not in existing]
+        if fresh:
+            try:
+                from . import pdfs
+                pdf_fetched = pdfs.fetch_many(fresh, pdfs.dir_for(db_path))["fetched"]
+            except Exception as e:                      # noqa: BLE001
+                log.warning(f"入库后试抓 OA 全文失败（文献已收进来了）：{e}")
+
     return {"articles": arts, "added": added, "updated": updated,
-            "existing": sorted(existing), "missing": missing}
+            "existing": sorted(existing), "missing": missing,
+            "pdf_fetched": pdf_fetched}

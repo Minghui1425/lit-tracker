@@ -5,7 +5,7 @@
 import pytest
 
 from conftest import BASE  # noqa: F401  （插入 sys.path）
-from littrack import entrez, intake, library
+from littrack import entrez, intake, library, pdfs
 from littrack.journals import JournalIndex
 
 
@@ -113,6 +113,48 @@ def test_collect_refuses_more_than_the_cap(cfg, db):
     with pytest.raises(intake.IntakeError, match="最多"):
         intake.collect(cfg, db, [str(i) for i in range(intake.MAX_PMIDS + 1)],
                        journals=JournalIndex.empty())
+
+
+def test_collect_does_not_touch_pdfs_unless_asked(cfg, db, monkeypatch):
+    monkeypatch.setattr(entrez, "efetch", lambda ids, **kw: [_art("1", "A heart failure trial")])
+    monkeypatch.setattr(pdfs, "fetch_many",
+                        lambda *a, **kw: pytest.fail("没要求抓全文就不该去抓"))
+    r = intake.collect(cfg, db, ["1"], journals=JournalIndex.empty())
+    assert r["pdf_fetched"] == 0
+
+
+def test_collect_can_fetch_oa_for_newly_added(cfg, db, monkeypatch):
+    monkeypatch.setattr(entrez, "efetch", lambda ids, **kw: [_art("1", "A heart failure trial")])
+    monkeypatch.setattr(pdfs, "fetch_many", lambda arts, d, **kw: {"fetched": len(arts)})
+    r = intake.collect(cfg, db, ["1"], journals=JournalIndex.empty(), fetch_pdf=True)
+    assert r["added"] == 1 and r["pdf_fetched"] == 1
+
+
+def test_collect_only_tries_oa_for_the_new_ones(cfg, db, monkeypatch):
+    """已在库的要么早有 PDF，要么之前就试过没拿到，重试一遍多半还是白等。"""
+    monkeypatch.setattr(entrez, "efetch",
+                        lambda ids, **kw: [_art(p, f"Trial {p}") for p in ids])
+    intake.collect(cfg, db, ["1"], journals=JournalIndex.empty())        # 先收 1
+
+    seen = []
+    monkeypatch.setattr(pdfs, "fetch_many",
+                        lambda arts, d, **kw: (seen.extend(a["pmid"] for a in arts),
+                                               {"fetched": 0})[1])
+    intake.collect(cfg, db, ["1", "2"], journals=JournalIndex.empty(), fetch_pdf=True)
+    assert seen == ["2"]
+
+
+def test_a_failed_pdf_fetch_never_breaks_the_add(cfg, db, monkeypatch):
+    """全文是附加品：抓不到、甚至抓崩了，都不该让「文献已经收进来了」变成一次失败。"""
+    monkeypatch.setattr(entrez, "efetch", lambda ids, **kw: [_art("1", "A heart failure trial")])
+
+    def boom(*a, **kw):
+        raise RuntimeError("Europe PMC 连不上")
+
+    monkeypatch.setattr(pdfs, "fetch_many", boom)
+    r = intake.collect(cfg, db, ["1"], journals=JournalIndex.empty(), fetch_pdf=True)
+    assert r["added"] == 1 and r["pdf_fetched"] == 0
+    assert [a["pmid"] for a in library.all_articles(db)] == ["1"]
 
 
 def test_collect_reports_when_pubmed_returns_nothing(cfg, db, monkeypatch):

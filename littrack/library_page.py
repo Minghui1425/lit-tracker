@@ -282,7 +282,7 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
 <div id=addm>
   <h3>添加文献</h3>
   <p>粘贴 PubMed 文章的完整标题，或输入 PMID（多个用空格/逗号分隔，一次最多 50 篇）。
-     需要 <code>serve</code> 正在运行。</p>
+     新收的会顺手试抓一次 OA 全文。需要 <code>serve</code> 正在运行。</p>
   <input type=text id=add-q placeholder="文章标题 或 PMID"
          onkeydown="if(event.key==='Enter')doAdd()">
   <div class=addr>
@@ -600,7 +600,7 @@ function doAdd(){{
   const q=document.getElementById('add-q').value.trim();
   if(!q) return alert('请输入文章标题或 PMID');
   const btn=document.getElementById('add-go');
-  btn.disabled=true; btn.textContent='正在取…';
+  btn.disabled=true; btn.textContent='正在取…（含试抓全文）';
   post('/article/add',{{query:q,
                         section:document.getElementById('add-sec').value,
                         subsection:document.getElementById('add-sub').value}})
@@ -608,6 +608,9 @@ function doAdd(){{
       btn.disabled=false; btn.textContent='添加';
       if(!d) return;                       // 出错时 post 已经弹过原因了
       const L=['✓ 新增 '+d.added+' 篇'];
+      if(d.added) L.push(d.pdf_fetched
+        ? '　其中 '+d.pdf_fetched+' 篇已自动挂上 OA 全文'
+        : '　没找到免费全文（订阅刊需自行下载后拖进来）');
       if(d.updated) L.push('更新 '+d.updated+' 篇（已在库中，笔记与评级保留）');
       if(d.missing.length) L.push('PubMed 没有：'+d.missing.join('、'));
       alert(L.join('\\n'));
