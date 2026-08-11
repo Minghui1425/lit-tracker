@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import sqlite3
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 RATINGS = ("○", "⭐", "🚩")
 
@@ -143,12 +146,25 @@ def all_articles(db_path: Path) -> list[dict]:
 
 
 def delete(db_path: Path, pmids: list[str]) -> int:
+    """删文章，连带把它的全文 PDF 挪进 pdf/_trash/。
+
+    留着 PDF 不动的话，日后同一个 PMID 被重新收藏就会莫名其妙自带一份全文；
+    挪进 _trash 而不是真删，是因为删错了还能捞回来。
+    """
+    from . import pdfs
     init_db(db_path)
+    pdf_dir = pdfs.dir_for(db_path)
     with _conn(db_path) as c:
         n = 0
         for p in pmids:
-            n += c.execute("DELETE FROM articles WHERE pmid=?", (str(p),)).rowcount
+            hit = c.execute("DELETE FROM articles WHERE pmid=?", (str(p),)).rowcount
+            n += hit
             c.execute("DELETE FROM article_projects WHERE pmid=?", (str(p),))
+            if hit:
+                try:
+                    pdfs.trash(pdf_dir, p)
+                except OSError as e:
+                    log.warning(f"PMID {p} 已删，但它的 PDF 没能挪进回收站：{e}")
         return n
 
 

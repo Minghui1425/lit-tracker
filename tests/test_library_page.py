@@ -101,3 +101,52 @@ def test_empty_library_still_renders(cfg, db, tmp_path):
 def test_sanity_check_rejects_broken_js():
     with pytest.raises(RuntimeError):
         library_page._sanity_check("<html><script>function f(){ </script></html>")
+
+
+def _js_const(doc: str, name: str):
+    m = re.search(rf"^const {name} = (.+?);(?:\s*//.*)?$", doc, re.M)
+    assert m, f"页面里没有 {name}"
+    return json.loads(m.group(1))
+
+
+def test_filter_dropdowns_only_offer_values_present_in_the_library(cfg, db, tmp_path):
+    """列出 0 篇的子板块等于给人挖坑：选中后一片空白，还得回头怀疑是不是筛错了。"""
+    library.upsert(db, [
+        article("1", section="心衰进展", subsection="射血分数保留", journal="Circulation"),
+        article("2", section="药物不良反应", subsection="肾脏", journal="JAMA"),
+    ])
+    doc = (library_page.render(cfg, db, tmp_path / "l.html")).read_text(encoding="utf-8")
+
+    fsubs = _js_const(doc, "FSUBS")
+    assert fsubs["心衰进展"] == ["射血分数保留"]        # 「器械与介入」「其他」都还没有文章
+    assert fsubs["药物不良反应"] == ["肾脏"]
+    assert _js_const(doc, "ALLSUBS") == ["肾脏", "射血分数保留"]   # 顺序按配置，不按字母
+
+    # 「添加文献」弹窗用的仍是配置全量：新收的可能就是某个空子板块的第一篇
+    submap = _js_const(doc, "SUBMAP")
+    assert submap["心衰进展"] == ["射血分数保留", "器械与介入", "其他"]
+
+
+def test_journal_dropdown_is_narrowed_per_section(cfg, db, tmp_path):
+    library.upsert(db, [
+        article("1", section="心衰进展", subsection="其他", journal="Circulation"),
+        article("2", section="心衰进展", subsection="其他", journal="Eur Heart J"),
+        article("3", section="药物不良反应", subsection="肾脏", journal="JAMA"),
+    ])
+    doc = (library_page.render(cfg, db, tmp_path / "l.html")).read_text(encoding="utf-8")
+
+    assert _js_const(doc, "SECJRNS") == {"心衰进展": ["Circulation", "Eur Heart J"],
+                                         "药物不良反应": ["JAMA"]}
+    assert _js_const(doc, "ALLJRNS") == ["Circulation", "Eur Heart J", "JAMA"]
+
+
+def test_pdf_flag_reflects_the_filesystem(cfg, db, tmp_path):
+    """有没有 PDF 以目录为准，不在库表里另存字段——两处记录必然会漂移。"""
+    from littrack import pdfs
+    library.upsert(db, [article("1", section="心衰进展", subsection="其他"),
+                        article("2", section="心衰进展", subsection="其他")])
+    pdfs.save(pdfs.dir_for(db), "2", b"%PDF-1.4\n%%EOF\n")
+    doc = (library_page.render(cfg, db, tmp_path / "l.html")).read_text(encoding="utf-8")
+
+    flags = {a["pmid"]: a["pdf"] for a in _js_const(doc, "ARTS")}
+    assert flags == {"1": 0, "2": 1}

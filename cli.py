@@ -21,6 +21,7 @@
     python3 cli.py library   --config configs/我的配置.yaml   # 生成收藏库网页
     python3 cli.py serve     --config configs/我的配置.yaml   # 网页按钮的后端（含网页上「添加文献」），保持开着
     python3 cli.py citations --config configs/我的配置.yaml   # 算库内引用关系与被引数
+    python3 cli.py pdf       --config configs/我的配置.yaml --status   # 全文 PDF 覆盖情况
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ import argparse
 import datetime
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -300,7 +302,22 @@ def _serve(cfg, db_path: Path, idx_path: Path):
             """同源地提供收藏库页面，这样用户可以走 http:// 而不是 file://。"""
             if not self._host_ok():
                 self._reject_host(); return
-            if self.path.split("?", 1)[0] not in ("/", "/library.html"):
+            path = self.path.split("?", 1)[0]
+            # 全文 PDF：页面里是相对链接 pdf/<pmid>.pdf，file:// 下浏览器自己就能开，
+            # 走 http:// 时得由这里给。只认纯数字文件名，路径穿越无从谈起。
+            m = re.fullmatch(r"/pdf/(\d{1,9})\.pdf", path)
+            if m:
+                from littrack import pdfs
+                f = pdfs.path_for(pdfs.dir_for(db_path), m.group(1))
+                try:
+                    body = f.read_bytes()
+                except OSError:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body); return
+            if path not in ("/", "/library.html"):
                 self.send_response(404); self.end_headers(); return
             try:
                 body = idx_path.read_bytes()
@@ -317,6 +334,7 @@ def _serve(cfg, db_path: Path, idx_path: Path):
             if not self._host_ok():
                 self._reject_host(); return
             routes = ("/rating", "/note", "/delete", "/article/add",
+                      "/pdf/upload", "/pdf/delete", "/pdf/fetch", "/pdf/open",
                       "/project/add", "/project/remove",
                       "/obsidian/export", "/obsidian/refresh")
             if self.path not in routes:
@@ -346,6 +364,36 @@ def _serve(cfg, db_path: Path, idx_path: Path):
                                        subsection=(d.get("subsection") or "").strip(),
                                        translate=_translate)
                     res = {k: r[k] for k in ("added", "updated", "existing", "missing")}
+                elif self.path.startswith("/pdf/"):
+                    from littrack import pdfs
+                    pdf_dir = pdfs.dir_for(db_path)
+                    if self.path == "/pdf/upload":
+                        pmid = str(d.get("pmid", "")).strip()
+                        known = {a["pmid"] for a in library.all_articles(db_path)}
+                        if pmid not in known:
+                            raise ValueError(f"PMID {pmid} 不在收藏库里，请先添加文献再挂 PDF")
+                        import base64
+                        try:
+                            raw = base64.b64decode(d.get("content", ""), validate=True)
+                        except Exception:
+                            raise ValueError("PDF 内容解码失败，请重试")
+                        pdfs.save(pdf_dir, pmid, raw)
+                        res = {"pmid": pmid, "bytes": len(raw)}
+                    elif self.path == "/pdf/open":
+                        pmid = str(d.get("pmid", "")).strip()
+                        if not re.fullmatch(r"\d{1,9}", pmid):
+                            raise ValueError(f"不是合法的 PMID：{pmid}")
+                        res = {"pmid": pmid, "app": pdfs.open_external(pdf_dir, pmid)}
+                    elif self.path == "/pdf/delete":
+                        pmid = str(d.get("pmid", "")).strip()
+                        res = {"pmid": pmid, "removed": pdfs.trash(pdf_dir, pmid)}
+                    else:
+                        want = [str(p) for p in d.get("pmids", [])]
+                        if len(want) > pdfs.FETCH_MAX:
+                            raise ValueError(f"一次最多抓 {pdfs.FETCH_MAX} 篇")
+                        arts = [a for a in library.all_articles(db_path)
+                                if a["pmid"] in set(want)]
+                        res = pdfs.fetch_many(arts, pdf_dir)
                 elif self.path.startswith("/obsidian/"):
                     root = _vault()
                     if not root:
@@ -366,7 +414,8 @@ def _serve(cfg, db_path: Path, idx_path: Path):
                     if not name:
                         raise ValueError("项目名不能为空")
                     res = {"removed": library.remove_from_project(db_path, name, d.get("pmids", []))}
-                if self.path != "/note":          # 笔记改动频繁，不必每次重渲染
+                # /note 改得频繁，/pdf/open 根本没改任何东西——都不必重渲染
+                if self.path not in ("/note", "/pdf/open"):
                     library_page.render(cfg, db_path, idx_path, port=port, token=token)
                 body = _json.dumps(res, ensure_ascii=False).encode()
                 self.send_response(200); self._cors()
@@ -409,7 +458,7 @@ def main():
     ap.add_argument("command", choices=["template", "from-excel", "check", "validate",
                                         "weekly", "history", "add", "library",
                                         "obsidian", "project", "import-if", "serve",
-                                        "citations"])
+                                        "citations", "pdf"])
     ap.add_argument("--pmid", nargs="+", help="add：要收藏的 PMID，可多个")
     ap.add_argument("--section", help="add：手动指定板块（默认按配置自动判定）")
     ap.add_argument("--subsection", help="add：手动指定子板块")
@@ -425,6 +474,17 @@ def main():
     ap.add_argument("--archive", action="store_true", help="project：归档项目")
     ap.add_argument("--unarchive", action="store_true", help="project：取消归档")
     ap.add_argument("--all", action="store_true", help="obsidian：导出库中全部文献")
+    # pdf 子命令（--add / --delete / --pmid 与上面共用）
+    ap.add_argument("--fetch", action="store_true",
+                    help="pdf：抓 OA 全文（PMC / Unpaywall），不带 --pmid 就补全库里缺的")
+    ap.add_argument("--import", dest="imp", metavar="目录",
+                    help="pdf：把一个文件夹里的 PDF 按 DOI/标题认领进库")
+    ap.add_argument("--move", action="store_true",
+                    help="pdf --import：认领成功后删掉源文件（默认只复制）")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="pdf --import：只报告会认领哪些，不真的写入")
+    ap.add_argument("--file", help="pdf --add：本地 PDF 路径")
+    ap.add_argument("--status", action="store_true", help="pdf：看全文覆盖情况")
     ap.add_argument("--config", "-c", help="YAML 配置文件路径")
     ap.add_argument("--excel", "-e", help="Excel 配置文件路径")
     ap.add_argument("--out", "-o", help="输出路径（template / from-excel 用）")
@@ -692,6 +752,79 @@ def main():
         except ValueError as e:
             print(f"错误：{e}", file=sys.stderr); sys.exit(1)
         _refresh()
+        return
+
+    # ── 全文 PDF ──
+    if args.command == "pdf":
+        from littrack import library, library_page, pdfs
+        pdf_dir = pdfs.dir_for(db_path)
+        arts = library.all_articles(db_path)
+        known = {a["pmid"] for a in arts}
+
+        def _repage():
+            library_page.render(cfg, db_path, idx_path, port=_port(),
+                                token=_token(db_path.parent))
+
+        try:
+            if args.status or not (args.fetch or args.imp or args.add or args.delete):
+                got = pdfs.have(pdf_dir)
+                # 目录里可能有已经不在库中的遗留文件，分开数，免得算出「有 5/3 篇」
+                live = got & known
+                print(f"已有全文 {len(live)} / {len(arts)} 篇，缺 {len(arts)-len(live)} 篇")
+                print(f"  存放目录：{pdf_dir}")
+                if got - known:
+                    print(f"  另有 {len(got-known)} 个 PDF 的 PMID 已不在库中（多半是删过文献）")
+                return
+            if args.imp:
+                r = pdfs.import_dir(args.imp, pdf_dir, pdfs.build_index(arts),
+                                    move=args.move, dry_run=args.dry_run)
+                head = "将认领" if args.dry_run else "已认领"
+                print(f"{head} {len(r['imported'])} 个 PDF（扫描 {r['scanned']} 个）")
+                for it in r["imported"]:
+                    print(f"  ✓ {it['pmid']}  ←  {Path(it['file']).name}（{it['how']}）")
+                for it in r["failed"]:
+                    print(f"  ✗ {Path(it['file']).name}：{it['error']}", file=sys.stderr)
+                if r["unmatched"]:
+                    print(f"\n  没认出来的 {len(r['unmatched'])} 个（源文件没动）：")
+                    for name in r["unmatched"]:
+                        print(f"    ? {name}")
+                    try:
+                        import fitz  # noqa: F401
+                    except ImportError:
+                        print("\n  ⚠️ 没装 PyMuPDF，只能靠文件名里的 PMID 认领。"
+                              "装上可从正文里读 DOI 与标题，认领率高得多：\n"
+                              "     pip install PyMuPDF")
+            elif args.add:
+                if not args.pmid or len(args.pmid) != 1 or not args.file:
+                    ap.error("pdf --add 需要 --pmid <一个PMID> --file <PDF路径>")
+                pmid = str(args.pmid[0])
+                if pmid not in known:
+                    print(f"PMID {pmid} 不在收藏库里，请先 add 再挂 PDF", file=sys.stderr)
+                    sys.exit(1)
+                src = Path(args.file).expanduser()
+                pdfs.save(pdf_dir, pmid, src.read_bytes(), max_bytes=pdfs.IMPORT_MAX_BYTES)
+                print(f"✓ 已挂上全文：{pmid} ← {src.name}")
+            elif args.delete:
+                if not args.pmid:
+                    ap.error("pdf --delete 需要 --pmid")
+                n = sum(1 for p in args.pmid if pdfs.trash(pdf_dir, str(p)))
+                print(f"已把 {n} 篇的 PDF 挪进 {pdf_dir/'_trash'}（文献本身保留）")
+            else:                                    # --fetch
+                _require_key()
+                want = [a for a in arts if not args.pmid or a["pmid"] in {str(p) for p in args.pmid}]
+                if not os.environ.get("UNPAYWALL_EMAIL"):
+                    print("提示：没设 UNPAYWALL_EMAIL，本次只走 PMC 这一条路。\n"
+                          "      在 .env 里加 UNPAYWALL_EMAIL=你的邮箱 可多一条 OA 直链来源。")
+                r = pdfs.fetch_many(want, pdf_dir)
+                print(f"✓ OA 抓取：成功 {r['fetched']} 篇，未取到 {r['failed']} 篇，"
+                      f"已有跳过 {r['skipped']} 篇（共 {r['requested']} 篇）")
+                if r["failed"]:
+                    print("  订阅刊（Nature / NEJM / Lancet 等）通常没有 OA 版本，"
+                          "这些需要自行下载后拖进收藏库页面，或用 pdf --import")
+        except (pdfs.PdfError, OSError) as e:
+            print(f"错误：{e}", file=sys.stderr); sys.exit(1)
+        if not args.dry_run:
+            _repage()
         return
 
     if args.command == "obsidian":

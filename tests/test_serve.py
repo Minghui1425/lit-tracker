@@ -116,3 +116,62 @@ def test_foreign_host_is_rejected(server):
 def test_unknown_route_404(server):
     base, token, *_ = server
     assert _req(base + "/wipe", data={}, token=token, method="POST")[0] == 404
+
+
+def test_pdf_get_only_serves_numeric_names(server):
+    """新开的 /pdf/ GET 是本服务唯一读磁盘的路径，路径穿越必须无从下手。"""
+    base, _, db, _ = server
+    from littrack import pdfs
+    pdfs.save(pdfs.dir_for(db), "1", b"%PDF-1.4\n%%EOF\n")
+
+    assert _req(base + "/pdf/1.pdf")[0] == 200
+    assert _req(base + "/pdf/2.pdf")[0] == 404              # 库里没有这份
+    assert _req(base + "/pdf/../library.db")[0] == 404
+    assert _req(base + "/pdf/%2e%2e%2flibrary.db")[0] == 404
+    assert _req(base + "/pdf/abc.pdf")[0] == 404
+    assert _req(base + "/pdf/1.pdf/../../cli.py")[0] == 404
+
+
+def test_pdf_write_requires_token(server):
+    base, token, db, _ = server
+    from littrack import pdfs
+    body = {"pmid": "1", "content": "JVBERi0xLjQKJSVFT0YK"}   # base64 的最小 PDF
+    assert _req(base + "/pdf/upload", data=body, method="POST")[0] == 403
+    assert pdfs.have(pdfs.dir_for(db)) == set()
+
+    assert _req(base + "/pdf/upload", data=body, token=token, method="POST")[0] == 200
+    assert pdfs.have(pdfs.dir_for(db)) == {"1"}
+
+
+def test_pdf_upload_rejects_html_masquerading_as_pdf(server):
+    base, token, db, _ = server
+    from littrack import pdfs
+    status, msg = _req(base + "/pdf/upload", token=token, method="POST",
+                       data={"pmid": "1", "content": "PGh0bWw+bG9naW48L2h0bWw+"})
+    assert status == 500 and "%PDF" in msg
+    assert pdfs.have(pdfs.dir_for(db)) == set()
+
+
+def test_pdf_upload_refuses_pmids_not_in_the_library(server):
+    base, token, db, _ = server
+    from littrack import pdfs
+    status, msg = _req(base + "/pdf/upload", token=token, method="POST",
+                       data={"pmid": "99999999", "content": "JVBERi0xLjQKJSVFT0YK"})
+    assert status == 500 and "不在收藏库" in msg
+    assert pdfs.have(pdfs.dir_for(db)) == set()
+
+
+def test_pdf_open_requires_token_and_a_valid_pmid(server, monkeypatch):
+    """这条路由会在用户机器上拉起一个外部程序，凭据和 PMID 校验都不能少。"""
+    base, token, db, _ = server
+    from littrack import pdfs
+    pdfs.save(pdfs.dir_for(db), "1", b"%PDF-1.4\n%%EOF\n")
+
+    assert _req(base + "/pdf/open", data={"pmid": "1"}, method="POST")[0] == 403
+    for bad in ("", "abc", "../../x", "1; rm -rf /"):
+        status, msg = _req(base + "/pdf/open", data={"pmid": bad},
+                           token=token, method="POST")
+        assert status == 500 and "PMID" in msg
+    status, msg = _req(base + "/pdf/open", data={"pmid": "2"},
+                       token=token, method="POST")
+    assert status == 500 and "还没有 PDF" in msg

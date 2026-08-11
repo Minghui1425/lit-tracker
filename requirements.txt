@@ -2,3 +2,7 @@ requests>=2.28
 python-dotenv>=1.0
 PyYAML>=6.0
 openpyxl>=3.1        # Excel 配置模板（cli.py template / from-excel）
+
+# 可选：装了才能从 PDF 正文读 DOI / 标题来认领（cli.py pdf --import）。
+# 不装也能跑，只是退化成只认文件名里的 PMID。
+# PyMuPDF>=1.24

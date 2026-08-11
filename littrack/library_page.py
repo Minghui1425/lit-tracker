@@ -10,7 +10,7 @@ import html
 import json
 from pathlib import Path
 
-from . import library
+from . import library, pdfs
 
 
 def _esc(s) -> str:
@@ -48,6 +48,7 @@ h1{font-size:21px;margin:0 0 4px}
 .btn-d{border-color:#c0392b;color:#c0392b}
 .btn-o{border-color:#6c4ab6;color:#6c4ab6}
 .btn-b{border-color:#0056b3;color:#0056b3}
+.btn-r{border-color:#b02a1e;color:#b02a1e}
 .rl{font-weight:400!important;color:#333;display:flex;align-items:center;gap:3px}
 .vr{width:1px;height:18px;background:#ddd;margin:0 2px}
 .row-break{flex-basis:100%;display:flex;align-items:center;gap:10px}
@@ -69,6 +70,15 @@ tr:hover td{background:#f8fbff}
 .b-proj{background:#e6f5ef;color:#1a7f5a;border:1px solid #b7e0cd;border-radius:9px}
 .b-cit{background:#fdece8;color:#a03a22;cursor:pointer}
 .b-cc{background:#eceff1;color:#455a64}
+.b-pdf{background:#fdeaea;color:#b02a1e;text-decoration:none;margin-right:2px}
+.b-pdf:hover{background:#f9d6d3}
+.pdf-x{font-size:10px;color:#ccc;cursor:pointer;margin-right:6px}
+.pdf-x:hover{color:#c0392b}
+.pdf-add{display:inline-block;font-size:11px;padding:1px 6px;border-radius:3px;
+ margin-right:5px;font-weight:600;vertical-align:middle;color:#bbb;
+ border:1px dashed #ddd;cursor:pointer}
+.pdf-add:hover{color:#b02a1e;border-color:#f3c4c0;background:#fdeaea}
+tr.dragover td{background:#fff8e6!important;box-shadow:inset 0 0 0 2px #f0b429}
 .citers{display:none;font-size:12px;background:#fdfbfa;border-left:3px solid #f0cfc4;
  padding:6px 9px;margin-top:4px}
 .citers.open{display:block}
@@ -114,6 +124,7 @@ textarea{width:100%;font-size:12px;padding:4px 6px;border:1px solid #ddd;border-
  box-shadow:0 2px 8px rgba(0,0,0,.12);white-space:nowrap;max-height:52vh;overflow-y:auto}
 .ddp label{display:flex;align-items:center;gap:6px;font-size:13px;color:#333;
  font-weight:400;padding:2px 0;cursor:pointer}
+.ddsep{border-top:1px solid #eee;margin:5px 0}
 #pmod{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:901;
  flex-direction:column;width:min(520px,92vw);max-height:75vh;background:#fff;
  border-radius:8px;padding:18px 20px;box-shadow:0 8px 28px rgba(0,0,0,.22)}
@@ -150,6 +161,8 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
     arts = library.sorted_articles(config, library.all_articles(db_path))
     pmap = library.project_map(db_path)
     projects = library.list_projects(db_path)
+    has_pdf = pdfs.have(pdfs.dir_for(db_path))
+    fetch_max = pdfs.FETCH_MAX
 
     for a in arts:
         try:
@@ -170,6 +183,7 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
         "month": (a.get("pub_date") or "")[5:7],
         "citedby": _pmid_list(a.get("cited_by")), "cites": _pmid_list(a.get("cites")),
         "cc": a.get("citation_count"), "icc": a.get("influential_count"),
+        "pdf": 1 if a["pmid"] in has_pdf else 0,
     } for a in arts])
 
     # 年 → 该年出现过的月份，用于「年份」联动「月份」下拉
@@ -190,14 +204,54 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
         f'onchange="onIf()"> {_esc(t)}</label>'
         for v, t in (("0-5", "< 5"), ("5-10", "5 ～ 10"),
                      ("10-20", "10 ～ 20"), ("20-", "≥ 20")))
+    # 「引用情况」一栏管两件事：全球被引区间，和库内引用关系。放一起是因为找文章时
+    # 想的是同一个问题（这篇有多重要），但两者常常指向不同的篇目，所以能各自多选。
+    def _cit_group(items):
+        return "".join(
+            f'<label><input type=checkbox class=ccb value="{v}" data-l="{_esc(t)}" '
+            f'onchange="onCit()"> {_esc(t)}</label>' for v, t in items)
 
+    cit_boxes = (
+        _cit_group((("1-10", "被引 1～10"), ("10-30", "被引 10～30"),
+                    ("30-50", "被引 30～50"), ("50-100", "被引 50～100"),
+                    ("100-", "被引 ≥ 100")))
+        + '<div class=ddsep></div>'
+        + _cit_group((("db1", "有库内被引"), ("db3", "库内被引 ≥ 3 篇"),
+                      ("db0", "无库内被引"))))
+
+    # 「添加文献」弹窗里的子板块用的是**配置里的全量**：新收的文章本来就可能是某个
+    # 目前还空着的子板块的第一篇，那个选项必须能选到。
     sub_map = {s.name: s.subsection_names for s in config.sections}
     sub_map_js = _json_for_script(sub_map)
+
+    # 筛选栏的子板块/期刊则只列**库里真有的**——列出 0 篇的选项等于给人挖坑：
+    # 选中后一片空白，还得回头怀疑是不是筛错了。顺序仍按配置来，不按字母。
+    present_subs, sec_jrns = {}, {}
+    for a in arts:
+        sec = a.get("section") or ""
+        if a.get("subsection"):
+            present_subs.setdefault(sec, set()).add(a["subsection"])
+        if a.get("journal"):
+            sec_jrns.setdefault(sec, set()).add(a["journal"])
+    filter_subs = {s.name: [x for x in s.subsection_names
+                            if x in present_subs.get(s.name, ())]
+                   for s in config.sections}
+    # 全部板块时的并集，同样保持配置顺序
+    all_subs, seen = [], set()
+    for s in config.sections:
+        for x in filter_subs[s.name]:
+            if x not in seen:
+                seen.add(x); all_subs.append(x)
+    journals = sorted({a.get("journal", "") for a in arts if a.get("journal")})
+    filter_subs_js = _json_for_script(filter_subs)
+    all_subs_js = _json_for_script(all_subs)
+    sec_jrns_js = _json_for_script({k: sorted(v) for k, v in sec_jrns.items()})
+    all_jrns_js = _json_for_script(journals)
+
     projects_js = _json_for_script([p["name"] for p in projects])
     token_js = _json_for_script(token)
     sec_opts = "".join(f'<option value="{_esc(s.name)}">{_esc(s.name)}</option>'
                        for s in config.sections)
-    journals = sorted({a.get("journal", "") for a in arts if a.get("journal")})
     jrn_opts = "".join(f'<option value="{_esc(j)}">{_esc(j)}</option>' for j in journals)
     years = sorted({(a.get("pub_date") or "")[:4] for a in arts if a.get("pub_date")}, reverse=True)
     yr_opts = "".join(f'<option value="{y}">{y}</option>' for y in years)
@@ -272,15 +326,10 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
       <div class=ddp id=type-panel>{type_boxes}</div>
     </div></div>
   <div class=grp><label>引用情况</label>
-    <select id=f-cit onchange="apply()"><option value="">全部</option>
-      <option value="1-10">被引 1～10</option>
-      <option value="10-30">被引 10～30</option>
-      <option value="30-50">被引 30～50</option>
-      <option value="50-100">被引 50～100</option>
-      <option value="100-">被引 ≥ 100</option>
-      <option value="db1">有库内被引</option>
-      <option value="db3">库内被引 ≥ 3 篇</option>
-      <option value="db0">无库内被引</option></select></div>
+    <div class=dd>
+      <div class=ddb id=cit-lbl onclick="ddOpen(event,'cit-panel')">全部<i>▾</i></div>
+      <div class=ddp id=cit-panel>{cit_boxes}</div>
+    </div></div>
 
   <div class=row-break>
     <div class=grp><label>评级</label>
@@ -308,9 +357,17 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
       </select></div>
     <button class="btn btn-p" onclick="addProj()">加入项目</button>
     <button class=btn onclick="delProj()">移出项目</button>
+    <span class=vr></span>
+    <div class=grp><label>全文</label>
+      <select id=f-pdf onchange="apply()"><option value="">全部</option>
+        <option value="1">有 PDF</option><option value="0">无 PDF</option></select></div>
+    <button class="btn btn-r" onclick="fetchOa(event)"
+            title="对勾选的文献试着免费下载全文（PMC / Unpaywall）；订阅刊多半抓不到，需自行下载后拖入">抓取 OA 全文</button>
+    <span style="font-size:11px;color:#aaa">把 PDF 拖到任意一行即可挂上全文</span>
   </div>
 </div>
 
+<input type=file id=pdf-file accept="application/pdf,.pdf" style="display:none">
 <div id=cnt></div>
 <table><thead><tr>
   <th style="width:34px"><input type=checkbox id=cb-all onchange="toggleAll(this.checked)"></th>
@@ -320,7 +377,11 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
 
 <script>
 const ARTS = {js_arts};
-const SUBMAP = {sub_map_js};
+const SUBMAP = {sub_map_js};          // 配置全量，「添加文献」弹窗用
+const FSUBS = {filter_subs_js};       // 板块 → 库里真有的子板块，筛选栏用
+const ALLSUBS = {all_subs_js};
+const SECJRNS = {sec_jrns_js};        // 板块 → 库里真有的期刊
+const ALLJRNS = {all_jrns_js};
 const YM = {ym_js};
 const PROJECTS = {projects_js};
 const PORT = {port};
@@ -330,30 +391,39 @@ const API = (location.protocol==='http:'||location.protocol==='https:') ? '' : '
 let view = ARTS.slice();
 
 function esc(s){{return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}}
-function onSec(){{
-  const sec=document.getElementById('f-sec').value, sel=document.getElementById('f-sub');
+// 重填一个下拉，并尽量保住原来选中的值——换板块时把已经选好的期刊/子板块冲掉，
+// 等于每次都要重选一遍，而它多半在新板块里也还在。
+function refill(id, values, label){{
+  const sel=document.getElementById(id), prev=sel.value;
   sel.innerHTML='<option value="">全部</option>';
-  const subs = sec ? (SUBMAP[sec]||[]) : [].concat(...Object.values(SUBMAP));
-  [...new Set(subs)].forEach(s=>{{const o=document.createElement('option');o.value=s;o.textContent=s;sel.appendChild(o);}});
+  values.forEach(v=>{{
+    const o=document.createElement('option');
+    o.value=v; o.textContent=label?label(v):v;
+    if(v===prev) o.selected=true;
+    sel.appendChild(o);
+  }});
+}}
+function onSec(){{
+  const sec=document.getElementById('f-sec').value;
+  refill('f-sub', sec ? (FSUBS[sec]||[]) : ALLSUBS);
+  // 期刊也跟着收窄到该板块实际有的那些
+  refill('f-jrn', sec ? (SECJRNS[sec]||[]) : ALLJRNS);
   apply();
 }}
 function onYear(){{
-  const y=document.getElementById('f-year').value, sel=document.getElementById('f-month');
-  sel.innerHTML='<option value="">全部</option>';
-  (y?(YM[y]||[]):[]).forEach(m=>{{
-    const o=document.createElement('option'); o.value=m; o.textContent=parseInt(m,10)+'月';
-    sel.appendChild(o);
-  }});
+  const y=document.getElementById('f-year').value;
+  refill('f-month', y?(YM[y]||[]):[], m=>parseInt(m,10)+'月');
   apply();
 }}
 function apply(){{
   const g=i=>document.getElementById(i).value;
   const sec=g('f-sec'), sub=g('f-sub'), yr=g('f-year'), mo=g('f-month'), jr=g('f-jrn'),
-        tier=g('f-tier'), prj=g('f-prj'), cit=g('f-cit'),
+        tier=g('f-tier'), prj=g('f-prj'), pdf=g('f-pdf'),
         kw=g('f-kw').toLowerCase(), abs=g('f-abs').toLowerCase(),
         rts=[...document.querySelectorAll('.rcb:checked')].map(c=>c.value),
         tps=[...document.querySelectorAll('.tcb:checked')].map(c=>c.value),
-        ifr=[...document.querySelectorAll('.icb:checked')].map(c=>c.value);
+        ifr=[...document.querySelectorAll('.icb:checked')].map(c=>c.value),
+        cir=[...document.querySelectorAll('.ccb:checked')].map(c=>c.value);
   view = ARTS.filter(a=>{{
     let pOk = true;
     if(prj==='__none__') pOk = !a.proj || a.proj.length===0;
@@ -367,17 +437,18 @@ function apply(){{
         return v>=parseFloat(p[0]) && v<(p[1]?parseFloat(p[1]):Infinity);
       }});
     }}
-    // 「引用情况」一个下拉管两件事：db* 走库内引用关系，其余是全球被引数的区间
+    // 「引用情况」管两件事：db* 走库内引用关系，其余是全球被引数的区间。多选取并集
     let cOk = true;
-    if(cit.slice(0,2)==='db'){{
-      const n=(a.citedby||[]).length, want=parseInt(cit.slice(2),10);
-      cOk = want===0 ? n===0 : n>=want;
-    }} else if(cit){{
-      const cc=a.cc||0, p=cit.split('-');          // 左闭右开 [lo, hi)
-      const lo=parseInt(p[0],10), hi=p[1]?parseInt(p[1],10):Infinity;
-      cOk = cc>=lo && cc<hi;
-    }}
-    return (!sec||a.sec===sec) && (!sub||a.sub===sub) && (!yr||a.year===yr) &&
+    if(cir.length) cOk = cir.some(r=>{{
+      if(r.slice(0,2)==='db'){{
+        const n=(a.citedby||[]).length, want=parseInt(r.slice(2),10);
+        return want===0 ? n===0 : n>=want;
+      }}
+      const cc=a.cc||0, p=r.split('-');             // 左闭右开 [lo, hi)
+      return cc>=parseInt(p[0],10) && cc<(p[1]?parseInt(p[1],10):Infinity);
+    }});
+    const fOk = !pdf || (pdf==='1' ? !!a.pdf : !a.pdf);
+    return fOk && (!sec||a.sec===sec) && (!sub||a.sub===sub) && (!yr||a.year===yr) &&
            (!mo||a.month===mo) && (!jr||a.journal===jr) && (!tier||a.q===tier) && iOk && cOk &&
            (!rts.length||rts.includes(a.rating)) && (!tps.length||tps.includes(a.type)) &&
            (!kw|| (a.title+a.zh).toLowerCase().includes(kw)) &&
@@ -386,13 +457,14 @@ function apply(){{
   draw();
 }}
 function reset(){{
-  ['f-sec','f-sub','f-year','f-month','f-jrn','f-tier','f-prj','f-cit']
+  ['f-sec','f-sub','f-year','f-month','f-jrn','f-tier','f-prj','f-pdf']
     .forEach(i=>document.getElementById(i).value='');
   document.getElementById('f-kw').value='';
   document.getElementById('f-abs').value='';
-  document.querySelectorAll('.rcb,.tcb,.icb').forEach(c=>c.checked=false);
-  ddLabel('.icb','if-lbl'); ddLabel('.tcb','type-lbl');
-  document.getElementById('f-month').innerHTML='<option value="">全部</option>';
+  document.querySelectorAll('.rcb,.tcb,.icb,.ccb').forEach(c=>c.checked=false);
+  ddLabel('.icb','if-lbl'); ddLabel('.tcb','type-lbl'); ddLabel('.ccb','cit-lbl');
+  // 三个联动下拉刚被清空了选中值，refill 保不住什么，正好回到全量
+  refill('f-month', []);
   onSec();
 }}
 // ── 收起式多选下拉（IF / 文章类型）──
@@ -421,6 +493,7 @@ function ddLabel(sel,btn){{
 }}
 function onIf(){{ ddLabel('.icb','if-lbl'); apply(); }}
 function onType(){{ ddLabel('.tcb','type-lbl'); apply(); }}
+function onCit(){{ ddLabel('.ccb','cit-lbl'); apply(); }}
 function draw(){{
   document.getElementById('cnt').innerHTML='显示 <strong>'+view.length+'</strong> / '+ARTS.length+' 篇';
   const tb=document.getElementById('tb');
@@ -439,7 +512,19 @@ function draw(){{
     const ccBadge = (a.cc===null||a.cc===undefined) ? ''
       : '<span class="b b-cc" title="Semantic Scholar 统计的全球被引数">被引 '+a.cc
         +(a.icc?'（高影响 '+a.icc+'）':'')+'</span>';
-    return '<tr><td><input type=checkbox class=acb data-pmid="'+a.pmid+'"></td>'
+    // 全文 PDF：有则红色徽章（相对链接，file:// 和 http:// 都能开），无则「+ PDF」
+    // 点选上传；整行也接受把 PDF 拖进来
+    const pdfChip = a.pdf
+      ? '<a class="b b-pdf" href="pdf/'+a.pmid+'.pdf" target=_blank rel=noopener'
+        +' title="用系统默认 PDF 应用打开（serve 没开时退回浏览器）；按住 ⌘/Ctrl 点则直接用浏览器打开"'
+        +' onclick="return openPdf(event,\\''+a.pmid+'\\')">PDF</a>'
+        +'<span class=pdf-x title="移除该 PDF（挪到 pdf/_trash/）"'
+        +' onclick="removePdf(\\''+a.pmid+'\\')">✕</span>'
+      : '<span class=pdf-add title="点击选择 PDF，或直接把 PDF 拖到这一行"'
+        +' onclick="pickPdf(\\''+a.pmid+'\\')">+ PDF</span>';
+    return '<tr data-pmid="'+a.pmid+'" ondragover="pdfOver(event,this)"'
+      +' ondragleave="pdfLeave(event,this)" ondrop="pdfDrop(event,this)">'
+      +'<td><input type=checkbox class=acb data-pmid="'+a.pmid+'"></td>'
       +'<td><span class="b b-sec">'+esc(a.sec)+'</span>'+(a.sub?'<div><span class="b b-sub">'+esc(a.sub)+'</span></div>':'')+'</td>'
       +'<td>'+esc(a.journal)+'<div>'
         +(a.q==='Q1'?'<span class="b b-q1">Q1</span>':'')+(a.q==='Q2'?'<span class="b b-q2">Q2</span>':'')
@@ -452,7 +537,7 @@ function draw(){{
         +(a.kw?'<div class=ln>关键词：'+esc(a.kw)+'</div>':'')
         +(a.aff?'<div class=ln>通讯单位：'+esc(a.aff)+'</div>':'')
         +(a.abs?'<div class=abs-t onclick="document.getElementById(\\''+id+'\\').classList.toggle(\\'open\\')">▶ 摘要</div><div class=abs id='+id+'>'+a.abs+'</div>':'')
-        +'<div>'+rt+'</div>'
+        +'<div>'+pdfChip+rt+'</div>'
         +'<textarea placeholder="Notes…" onchange="setNote(\\''+a.pmid+'\\',this.value)">'+esc(a.notes)+'</textarea>'
       +'</td></tr>';
   }}).join('');
@@ -642,6 +727,84 @@ function toObsidian(){{
 }}
 function refreshObsidian(){{
   post('/obsidian/refresh',{{}},d=>'✓ 已刷新：现有笔记 '+d.total+' 篇，归位 '+d.moved+' 篇\\n总录与项目索引已重建');
+}}
+// ── 全文 PDF ──
+// 上传走 /pdf/upload（base64），文件落在 <收藏库目录>/pdf/<pmid>.pdf；页面只用相对
+// 链接打开它，所以不涉及 file:// 绝对路径被浏览器拦下的问题。
+function setPdf(pmid, has){{
+  const a=ARTS.find(x=>x.pmid===pmid); if(a) a.pdf = has?1:0;
+  apply();
+}}
+function uploadPdf(pmid, file){{
+  if(!file) return;
+  if(!/\\.pdf$/i.test(file.name) && file.type!=='application/pdf') return alert('只接受 PDF 文件');
+  const r=new FileReader();
+  r.onerror=()=>alert('读取文件失败');
+  r.onload=()=>{{
+    const b64=String(r.result).split(',')[1]||'';
+    post('/pdf/upload',{{pmid:pmid,content:b64}}).then(d=>{{ if(d) setPdf(pmid,true); }});
+  }};
+  r.readAsDataURL(file);
+}}
+// 点 PDF 徽章：先请本地服务用系统默认应用打开——浏览器内置阅读器做不了高亮批注，
+// 系统阅读器的标注能直接存回同一个文件。serve 没起来（或打不开）时**不拦**，让 <a>
+// 照常用浏览器打开，功能不至于全丢。想直接用浏览器看，按住 ⌘/Ctrl 点。
+function openPdf(e, pmid){{
+  if(e.metaKey||e.ctrlKey||e.shiftKey||e.button===1) return true;
+  e.preventDefault();
+  const href=e.currentTarget.getAttribute('href');
+  const open=()=>window.open(href,'_blank','noopener');
+  fetch(API+'/pdf/open', {{method:'POST',
+    headers:{{'Content-Type':'application/json','X-LitTrack-Token':TOKEN}},
+    body:JSON.stringify({{pmid:pmid}})}})
+    .then(r=>{{ if(!r.ok) open(); }})
+    .catch(open);
+  return false;
+}}
+function pickPdf(pmid){{
+  const inp=document.getElementById('pdf-file');
+  inp.value=''; inp.onchange=()=>uploadPdf(pmid, inp.files[0]); inp.click();
+}}
+function removePdf(pmid){{
+  if(!confirm('把这篇的 PDF 挪进 pdf/_trash/？（不会删除文献本身）')) return;
+  post('/pdf/delete',{{pmid:pmid}}).then(d=>{{ if(d) setPdf(pmid,false); }});
+}}
+function dragFile(e){{
+  const it=e.dataTransfer&&e.dataTransfer.items;
+  if(!it||!it.length) return true;        // 老浏览器给不出 items，放行到 drop 再判
+  for(let i=0;i<it.length;i++) if(it[i].kind==='file') return true;
+  return false;
+}}
+function pdfOver(e,tr){{
+  if(!dragFile(e)) return;
+  e.preventDefault(); e.dataTransfer.dropEffect='copy'; tr.classList.add('dragover');
+}}
+function pdfLeave(e,tr){{
+  if(e.relatedTarget && tr.contains(e.relatedTarget)) return;  // 行内子元素间移动不算离开
+  tr.classList.remove('dragover');
+}}
+function pdfDrop(e,tr){{
+  e.preventDefault(); tr.classList.remove('dragover');
+  uploadPdf(tr.dataset.pmid, e.dataTransfer.files && e.dataTransfer.files[0]);
+}}
+// 整页禁掉默认拖放，否则没落在行上的 PDF 会被浏览器当成导航、直接跳去看那个文件
+['dragover','drop'].forEach(ev=>document.addEventListener(ev,e=>{{
+  if(dragFile(e)) e.preventDefault();
+}}));
+function fetchOa(ev){{
+  const s=checked(); if(!s.length) return alert('请先勾选要抓全文的文献');
+  if(s.length>{fetch_max}) return alert('一次最多抓 {fetch_max} 篇');
+  const btn=ev&&ev.target, lab=btn?btn.textContent:'';
+  if(btn){{ btn.disabled=true; btn.textContent='抓取中…'; }}
+  post('/pdf/fetch',{{pmids:s}}).then(d=>{{
+    if(btn){{ btn.disabled=false; btn.textContent=lab; }}
+    if(!d) return;
+    (d.detail||[]).forEach(x=>{{ if(x.ok){{const a=ARTS.find(y=>y.pmid===x.pmid); if(a) a.pdf=1;}} }});
+    apply();
+    alert('OA 全文抓取完成：成功 '+d.fetched+' 篇，未取到 '+d.failed
+      +' 篇，已有 PDF 跳过 '+d.skipped+' 篇。'
+      +'\\n订阅刊（Nature / NEJM / Lancet 等）通常没有 OA 版本，需自行下载后拖进来。');
+  }});
 }}
 function dl(name, text){{
   const b=new Blob([text],{{type:'text/plain;charset=utf-8'}}), a=document.createElement('a');

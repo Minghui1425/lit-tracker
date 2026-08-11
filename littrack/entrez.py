@@ -101,6 +101,35 @@ def esearch(term: str, retmax: int = RETMAX) -> list[str]:
     return ids
 
 
+def pmc_ids(pmids: list[str], batch: int = 180) -> dict:
+    """PMID → PMCID。没有 PMC 版本的不出现在结果里。
+
+    id 必须**重复传参**（id=1&id=2），不能逗号拼接：逗号形式会被 NCBI 合并成一个
+    linkset，links 是所有输入的并集，按位置回填就会把别人的 PMCID 安到本篇头上，
+    进而下载到完全不相干的 PDF。
+    """
+    out: dict[str, str] = {}
+    for i in range(0, len(pmids), batch):
+        chunk = [str(p) for p in pmids[i:i + batch]]
+        params = {"dbfrom": "pubmed", "db": "pmc", "id": chunk,
+                  "api_key": _api_key(), "tool": TOOL, "retmode": "json"}
+        email = _email()
+        if email:
+            params["email"] = email
+        try:
+            r = _SESSION.get(ENTREZ_BASE + "elink.fcgi", params=params, timeout=40)
+            r.raise_for_status()
+            for ls in r.json().get("linksets", []):
+                src = (ls.get("ids") or [None])[0]
+                for db in ls.get("linksetdbs", []):
+                    if db.get("linkname") == "pubmed_pmc" and db.get("links"):
+                        out[str(src)] = "PMC" + str(db["links"][0])
+        except (requests.RequestException, ValueError) as e:
+            log.warning(f"elink 查 PMCID 失败：{mask_secret(e)}")
+        time.sleep(0.2)
+    return out
+
+
 def efetch(pmids: list[str], batch: int = 200) -> list[dict]:
     """按 PMID 批量取文献详情。"""
     out: list[dict] = []
