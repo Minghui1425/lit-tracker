@@ -115,13 +115,50 @@ def _run(cfg, start: str, end: str, tag: str):
     grouped = search.group_by_section(cfg, arts)
 
     out = (BASE / cfg.output_dir / f"{tag}_{start}_{end}.html")
-    render.render(cfg, grouped, start, end, out)
+    # 报告页上的「加入收藏库」要打本地服务，凭据与收藏库页面用同一枚
+    render.render(cfg, grouped, start, end, out,
+                  port=_port(), token=_token(BASE / cfg.output_dir))
     logging.info(f"HTML 已写入：{out}")
     for sec, subs in grouped.items():
         logging.info(f"  [{sec}] {sum(len(v) for v in subs.values())} 篇")
         for sub, v in subs.items():
             logging.info(f"     {sub}: {len(v)}")
     return out
+
+
+def _import_refs(cfg, db_path: Path, items: list, *, section: str = "",
+                 subsection: str = "", fetch_pdf: bool = False, on_each=None) -> dict:
+    """解析出的记录 → PMID → 入库。命令行与收藏库页面走同一条路。
+
+    分批是必须的：`intake.collect` 一次最多 50 篇（每篇都要回 PubMed 取元数据），
+    而导出文件动辄几百条。
+    """
+    from littrack import intake, refs
+    r = refs.resolve(items, on_each=on_each)
+    out = {**r, "added": 0, "updated": 0, "pdf_fetched": 0, "missing": []}
+    idx = JournalIndex.load(BASE / "if_data.json")
+    step = intake.MAX_PMIDS
+    for i in range(0, len(r["pmids"]), step):
+        res = intake.collect(cfg, db_path, r["pmids"][i:i + step], journals=idx,
+                             section=section, subsection=subsection,
+                             translate=_translate, fetch_pdf=fetch_pdf)
+        out["added"] += res["added"]
+        out["updated"] += res["updated"]
+        out["pdf_fetched"] += res["pdf_fetched"]
+        out["missing"] += res["missing"]
+    return out
+
+
+def _report_refs(r: dict) -> None:
+    """把「哪些落到了 PMID、哪些没落上」讲清楚。没落上的多半不是 bug。"""
+    print(f"\n落到 PMID 的有 {len(r['pmids'])} 篇"
+          f"（文件里带的 {r['how']['pmid']} · DOI 查到 {r['how']['doi']} · "
+          f"标题查到 {r['how']['title']}）")
+    if r["unresolved"]:
+        print(f"  没能落到 PMID 的 {len(r['unresolved'])} 条"
+              f"（多半是书籍/网页/会议摘要，PubMed 本来就没有）：")
+        for it in r["unresolved"]:
+            print(f"    ? {(it['title'] or it['doi'] or '（无标题）')[:60]}：{it['why']}")
 
 
 def _date(text: str, flag: str) -> datetime.date:
@@ -333,7 +370,8 @@ def _serve(cfg, db_path: Path, idx_path: Path):
             raw = self._body_bytes()          # 先读干净，无论后面放行还是拒绝
             if not self._host_ok():
                 self._reject_host(); return
-            routes = ("/rating", "/note", "/delete", "/article/add",
+            routes = ("/rating", "/note", "/delete",
+                      "/article/add", "/article/add-from-report", "/article/import",
                       "/pdf/upload", "/pdf/delete", "/pdf/fetch", "/pdf/open",
                       "/project/add", "/project/remove",
                       "/obsidian/export", "/obsidian/refresh")
@@ -365,6 +403,52 @@ def _serve(cfg, db_path: Path, idx_path: Path):
                                        section=(d.get("section") or "").strip(),
                                        subsection=(d.get("subsection") or "").strip(),
                                        translate=_translate, fetch_pdf=True)
+                    res = {k: r[k] for k in ("added", "updated", "existing",
+                                             "missing", "pdf_fetched")}
+                elif self.path == "/article/import":
+                    # EndNote / Zotero 导出文件：页面把文件内容当文本发上来（不传路径，
+                    # 服务端也就不必去读用户磁盘上的任意文件）。
+                    from littrack import refs
+                    text = d.get("content") or ""
+                    if not isinstance(text, str) or not text.strip():
+                        raise ValueError("文件是空的")
+                    name = str(d.get("name") or "")[:120]
+                    # 先解析再查密钥：文件本身有问题的话，此刻就该告诉用户，
+                    # 而不是先甩一句「没设 NCBI_API_KEY」让人查错方向
+                    fmt, items = refs.parse_text(text, name, Path(name).suffix)
+                    if not os.environ.get("NCBI_API_KEY"):
+                        raise ValueError("未设置 NCBI_API_KEY，无法向 PubMed 取数据。\n"
+                                         "请在项目根目录的 .env 里写入 NCBI_API_KEY=你的密钥，"
+                                         "然后重启本服务。")
+                    r = _import_refs(cfg, db_path, items,
+                                     section=(d.get("section") or "").strip(),
+                                     subsection=(d.get("subsection") or "").strip(),
+                                     fetch_pdf=True)
+                    res = {"format": refs.FORMAT_NAMES[fmt], "records": len(items),
+                           "resolved": len(r["pmids"]), "how": r["how"],
+                           "added": r["added"], "updated": r["updated"],
+                           "missing": r["missing"], "pdf_fetched": r["pdf_fetched"],
+                           "unresolved": [{"title": u["title"], "doi": u["doi"],
+                                           "why": u["why"]} for u in r["unresolved"]]}
+                elif self.path == "/article/add-from-report":
+                    # 周报 / 历史报告页上勾选后的「加入收藏库」。板块与子板块取自
+                    # 那页 —— 报告生成时就归好类了，用户看到什么就存成什么。
+                    from littrack import intake
+                    if not os.environ.get("NCBI_API_KEY"):
+                        raise ValueError("未设置 NCBI_API_KEY，无法向 PubMed 取数据。\n"
+                                         "请在项目根目录的 .env 里写入 NCBI_API_KEY=你的密钥，"
+                                         "然后重启本服务。")
+                    items = d.get("items") or []
+                    if not isinstance(items, list):
+                        raise ValueError("items 需要是数组")
+                    pmids = intake.parse_pmids([str(i.get("pmid", "")) for i in items])
+                    smap = {str(i.get("pmid", "")).strip():
+                            ((i.get("section") or "").strip(),
+                             (i.get("subsection") or "").strip())
+                            for i in items if (i.get("section") or "").strip()}
+                    r = intake.collect(cfg, db_path, pmids, journals=_jrn_index(),
+                                       section_map=smap, translate=_translate,
+                                       fetch_pdf=True)
                     res = {k: r[k] for k in ("added", "updated", "existing",
                                              "missing", "pdf_fetched")}
                 elif self.path.startswith("/pdf/"):
@@ -459,9 +543,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
     ap.add_argument("command", choices=["template", "from-excel", "check", "validate",
-                                        "weekly", "history", "add", "library",
-                                        "obsidian", "project", "import-if", "serve",
-                                        "citations", "pdf"])
+                                        "weekly", "history", "add", "import-refs",
+                                        "library", "obsidian", "project", "import-if",
+                                        "serve", "citations", "pdf"])
     ap.add_argument("--pmid", nargs="+", help="add：要收藏的 PMID，可多个")
     ap.add_argument("--section", help="add：手动指定板块（默认按配置自动判定）")
     ap.add_argument("--subsection", help="add：手动指定子板块")
@@ -479,15 +563,17 @@ def main():
     ap.add_argument("--all", action="store_true", help="obsidian：导出库中全部文献")
     # pdf 子命令（--add / --delete / --pmid 与上面共用）
     ap.add_argument("--fetch", action="store_true",
-                    help="pdf：抓 OA 全文（PMC / Unpaywall），不带 --pmid 就补全库里缺的；"
-                         "add：新收的顺手试抓一次全文（网页上的「添加文献」一律会试）")
+                    help="pdf：抓 OA 全文（PMC / Unpaywall），不带 --pmid 就补全库里缺的")
+    ap.add_argument("--no-fetch", action="store_true",
+                    help="add / import-refs：不要顺手试抓 OA 全文（默认会试）")
     ap.add_argument("--import", dest="imp", metavar="目录",
                     help="pdf：把一个文件夹里的 PDF 按 DOI/标题认领进库")
     ap.add_argument("--move", action="store_true",
                     help="pdf --import：认领成功后删掉源文件（默认只复制）")
     ap.add_argument("--dry-run", action="store_true",
-                    help="pdf --import：只报告会认领哪些，不真的写入")
-    ap.add_argument("--file", help="pdf --add：本地 PDF 路径")
+                    help="pdf --import / import-refs：只报告会做什么，不真的写入")
+    ap.add_argument("--file", help="pdf --add：本地 PDF 路径；"
+                                   "import-refs：EndNote/Zotero 导出的文献文件")
     ap.add_argument("--status", action="store_true", help="pdf：看全文覆盖情况")
     ap.add_argument("--config", "-c", help="YAML 配置文件路径")
     ap.add_argument("--excel", "-e", help="Excel 配置文件路径")
@@ -598,7 +684,7 @@ def main():
             res = intake.collect(cfg, db_path, pmids, journals=idx,
                                  section=args.section or "",
                                  subsection=args.subsection or "",
-                                 translate=_translate, fetch_pdf=args.fetch)
+                                 translate=_translate, fetch_pdf=not args.no_fetch)
         except intake.IntakeError as e:
             print(e, file=sys.stderr)
             sys.exit(1)
@@ -611,7 +697,7 @@ def main():
                  f"你的笔记与评级保留）" if updated else ""))
         if res["missing"]:
             print(f"    PubMed 没有这些 PMID：{'、'.join(res['missing'])}")
-        if args.fetch and added:
+        if not args.no_fetch and added:
             print(f"    其中 {res['pdf_fetched']} 篇已自动挂上 OA 全文"
                   + ("" if res["pdf_fetched"] else "（订阅刊没有 OA 版本，需自行下载）"))
         unmatched = []
@@ -629,6 +715,57 @@ def main():
                   f"       · 或在配置里补上相应关键词后重新入库\n"
                   f"     当前配置的板块：{'、'.join(cfg.section_names)}")
         print(f"\n  收藏库页面：{idx_path}")
+        return
+
+    # ── 从 EndNote / Zotero 的导出文件批量入库 ──
+    if args.command == "import-refs":
+        if not args.file:
+            ap.error("import-refs 需要 --file 指定导出文件，"
+                     "例：--file ~/Downloads/My Library.ris")
+        _require_key()
+        from littrack import intake, library_page, refs
+        try:
+            fmt, items = refs.read_file(args.file)
+        except refs.RefError as e:
+            print(f"错误：{e}", file=sys.stderr); sys.exit(1)
+        ready = sum(1 for r in items if r["pmid"])
+        print(f"{Path(args.file).name}：按 {refs.FORMAT_NAMES[fmt]} 解析出 {len(items)} 条，"
+              f"其中 {ready} 条自带 PMID")
+        if ready < len(items):
+            print(f"  另外 {len(items)-ready} 条要回 PubMed 按 DOI / 标题查，会慢一些…")
+
+        def _tick(i, total, ref, pmid, why):
+            tag = {"pmid": "文件里的 PMID", "doi": "按 DOI 查到",
+                   "title": "按标题查到"}.get(why, why)
+            head = f"  [{i}/{total}]"
+            print(f"{head} {pmid} … {tag}" if pmid
+                  else f"{head} ✗ {(ref['title'] or ref['doi'] or '（无标题）')[:50]}：{tag}")
+
+        if args.dry_run:
+            r = refs.resolve(items, on_each=_tick)
+            _report_refs(r)
+            print(f"\n--dry-run：以上 {len(r['pmids'])} 篇未写入。去掉 --dry-run 即入库。")
+            return
+        try:
+            r = _import_refs(cfg, db_path, items, section=args.section or "",
+                             subsection=args.subsection or "",
+                             fetch_pdf=not args.no_fetch, on_each=_tick)
+        except intake.IntakeError as e:
+            print(e, file=sys.stderr); sys.exit(1)
+        _report_refs(r)
+        if not r["pmids"]:
+            print("\n没有可入库的文献。", file=sys.stderr)
+            sys.exit(1)
+        library_page.render(cfg, db_path, idx_path, port=_port(),
+                            token=_token(db_path.parent))
+        print(f"\n✓ 新增 {r['added']} 篇"
+              + (f"，更新 {r['updated']} 篇（原本就在库里，笔记与评级保留）"
+                 if r["updated"] else ""))
+        if r["missing"]:
+            print(f"    PubMed 没有这些 PMID：{'、'.join(r['missing'])}")
+        if not args.no_fetch:
+            print(f"    顺带抓到 {r['pdf_fetched']} 篇 OA 全文")
+        print(f"  收藏库页面：{idx_path}")
         return
 
     # ── 库内引文网络 ──

@@ -11,6 +11,21 @@ def _esc(s) -> str:
     return html.escape(str(s or ""), quote=True)
 
 
+def _json_for_script(value) -> str:
+    """内联到 <script> 里的序列化，堵住 ``</script>`` 逃逸。"""
+    return (json.dumps(value, ensure_ascii=False)
+            .replace("&", "\\u0026")
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace(" ", "\\u2028")
+            .replace(" ", "\\u2029"))
+
+
+# 一次加入收藏库的上限，与 intake.MAX_PMIDS 对齐（每篇都要回 PubMed 取元数据，
+# 一次几百篇会把请求拖到超时）。这里只作提示，服务端仍会自己再挡一道。
+ADD_MAX = 50
+
+
 _CSS = """
 *{box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
@@ -44,16 +59,86 @@ h1{font-size:22px;margin:0 0 4px}
  padding:7px 10px;margin-top:5px;border-radius:0 3px 3px 0}
 .abs.open{display:block}
 .empty{color:#999;padding:14px;font-size:13px}
+.bar{background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;
+ margin-bottom:14px;font-size:13px;display:flex;align-items:center;gap:10px;
+ flex-wrap:wrap}
+.bar button{padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px;
+ background:#fff;border:1px solid #ccc;color:#555}
+.bar button:hover{background:#f5f5f5}
+.bar button:disabled{opacity:.5;cursor:default}
+#add-lib{color:#0056b3;border-color:#0056b3}
+#add-lib:hover{background:#e8f0fe}
+#sel-n{color:#666}
+.art{position:relative}
+.art-cb{margin-right:7px;vertical-align:middle;cursor:pointer}
 """
 
 _JS = """
 function toggleAbs(id){var e=document.getElementById(id);
  if(e)e.classList.toggle('open');}
+function checked(){return Array.prototype.slice.call(
+  document.querySelectorAll('.art-cb:checked'));}
+function count(){
+  var n=checked().length;
+  document.getElementById('sel-n').textContent = n?('已选 '+n+' 篇'):'未选';
+  document.getElementById('add-lib').disabled = !n;
+}
+function selAll(on){
+  document.querySelectorAll('.art-cb').forEach(function(c){c.checked=on;});
+  count();
+}
+// 服务没起来时退回老路子：把等价的命令行复制给用户，功能不至于全丢。
+function fallback(pmids, err){
+  var cmd = 'python3 cli.py add --config <你的配置> --pmid ' + pmids.join(' ');
+  var tip = '加入失败：' + err.message +
+    '\\n（收藏库服务没起来？先在项目目录执行 python3 cli.py serve --config <你的配置>）' +
+    '\\n已把等价命令复制到剪贴板：\\n' + cmd;
+  var ta=document.createElement('textarea');
+  ta.value=cmd; ta.style.position='fixed'; ta.style.opacity='0';
+  document.body.appendChild(ta); ta.select();
+  try{document.execCommand('copy'); alert(tip);}
+  catch(e){alert('加入失败：'+err.message+'\\n请手动复制命令：\\n'+cmd);}
+  document.body.removeChild(ta);
+}
+function addToLibrary(){
+  var cbs=checked();
+  if(!cbs.length){alert('尚未勾选任何文献');return;}
+  if(cbs.length>ADD_MAX){
+    alert('一次最多加入 '+ADD_MAX+' 篇，这次勾了 '+cbs.length+' 篇。分几批来。');
+    return;
+  }
+  // 板块/子板块直接取自本页：这些文章在生成报告时已经按当时的配置归好类了，
+  // 服务端照用即可，不必再判一次（配置改过时，以你眼前这份报告为准）。
+  var items=cbs.map(function(c){return {pmid:c.dataset.pmid,
+    section:c.dataset.sec||'', subsection:c.dataset.sub||''};});
+  var btn=document.getElementById('add-lib'), label=btn.textContent;
+  btn.disabled=true; btn.textContent='正在加入…';
+  fetch(API+'/article/add-from-report',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-LitTrack-Token':TOKEN},
+    body:JSON.stringify({items:items})
+  }).then(function(r){
+    return r.text().then(function(t){
+      if(!r.ok) throw new Error(t||('HTTP '+r.status));
+      return JSON.parse(t);
+    });
+  }).then(function(d){
+    var msg='已加入收藏库 '+d.added+' 篇';
+    if(d.updated) msg+='，'+d.updated+' 篇原本就在库里（已刷新元数据，笔记与评级保留）';
+    if(d.missing&&d.missing.length) msg+='\\nPubMed 没有这些 PMID：'+d.missing.join(' ');
+    if(d.pdf_fetched) msg+='\\n顺带抓到 '+d.pdf_fetched+' 篇 OA 全文';
+    alert(msg);
+  }).catch(function(e){
+    fallback(items.map(function(i){return i.pmid;}), e);
+  }).then(function(){
+    btn.disabled=false; btn.textContent=label; count();
+  });
+}
 """
 
 
 def render(config, grouped: dict, start: str, end: str, out_path: Path,
-           subtitle: str = "") -> Path:
+           subtitle: str = "", *, port: int = 8765, token: str = "") -> Path:
     total = sum(len(v) for subs in grouped.values() for v in subs.values())
     parts = [
         f"<!doctype html><html lang=zh-CN><head><meta charset=utf-8>",
@@ -66,7 +151,18 @@ def render(config, grouped: dict, start: str, end: str, out_path: Path,
         f" &nbsp;|&nbsp; 生成于 {datetime.datetime.now():%Y-%m-%d %H:%M}</div>",
     ]
 
-    if not total:
+    if total:
+        # 勾选 → 一键入库。收藏库服务（cli.py serve）没起来时按钮会退回复制命令，
+        # 所以这排按钮在双击打开的 file:// 页面上也不算废掉。
+        parts.append(
+            "<div class=bar>"
+            "<button onclick='selAll(true)'>全选</button>"
+            "<button onclick='selAll(false)'>取消全选</button>"
+            "<button id=add-lib disabled onclick='addToLibrary()'>加入收藏库</button>"
+            "<span id=sel-n>未选</span>"
+            "<span style='color:#999'>（需要 <code>cli.py serve</code> 开着）</span>"
+            "</div>")
+    else:
         parts.append("<div class=empty>本区间未检索到符合条件的文献。</div>")
 
     for sec_name, subs in grouped.items():
@@ -87,7 +183,11 @@ def render(config, grouped: dict, start: str, end: str, out_path: Path,
                     badges += f"<span class='badge b-if'>IF {_esc(a['if_value'])}</span>"
                 kw = "; ".join(a.get("keywords") or []) or "—"
                 parts.append(
-                    f"<div class=art>{badges}"
+                    f"<div class=art>"
+                    f"<input type=checkbox class=art-cb onchange='count()'"
+                    f" data-pmid='{_esc(a['pmid'])}'"
+                    f" data-sec='{_esc(sec_name)}' data-sub='{_esc(sub_name)}'>"
+                    f"{badges}"
                     f"<a href='{url}' target=_blank rel=noopener>{_esc(a['title'])}</a>"
                     + (f"<div class=zh>{_esc(a['title_zh'])}</div>" if a.get("title_zh") else "")
                     + f"<div class=line><span class=b-j>{_esc(a.get('journal') or a.get('journal_full'))}</span>"
@@ -102,7 +202,13 @@ def render(config, grouped: dict, start: str, end: str, out_path: Path,
             parts.append("</div>")
         parts.append("</details>")
 
-    parts.append(f"<script>{_JS}</script></body></html>")
+    # 从 http://127.0.0.1:PORT/ 打开时用同源相对路径；双击 file:// 打开时回落到绝对地址
+    consts = (f"const PORT={int(port)};"
+              f"const TOKEN={_json_for_script(token)};"
+              f"const ADD_MAX={ADD_MAX};"
+              "const API=(location.protocol==='http:'||location.protocol==='https:')"
+              "?'':'http://127.0.0.1:'+PORT;")
+    parts.append(f"<script>{consts}{_JS}</script></body></html>")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("".join(parts), encoding="utf-8")
     return out_path

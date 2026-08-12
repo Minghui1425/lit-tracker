@@ -110,9 +110,13 @@ def check_section(config, section: str, subsection: str) -> None:
 
 
 def collect(config, db_path: Path, pmids: list[str], *, journals,
-            section: str = "", subsection: str = "", translate=None,
-            fetch_pdf: bool = False) -> dict:
+            section: str = "", subsection: str = "", section_map: dict | None = None,
+            translate=None, fetch_pdf: bool = False) -> dict:
     """抓元数据 → 归板块 → 写库 →（可选）顺手试一次免费全文。
+
+    归板块的优先级：手动指定的 section > section_map > 按配置重新判定。
+    section_map 是 {pmid: (板块, 子板块)}，给报告页的「加入收藏库」用——那些文章
+    在生成报告时就已经归好类了，直接沿用，用户眼前看到的分类才不会入库后变样。
 
     返回 {"articles", "added", "updated", "existing", "missing", "pdf_fetched"}：
       existing 是本次之前就在库里的（会按当前配置重新归类，笔记与评级保留），
@@ -121,6 +125,9 @@ def collect(config, db_path: Path, pmids: list[str], *, journals,
     if len(pmids) > MAX_PMIDS:
         raise IntakeError(f"一次最多添加 {MAX_PMIDS} 篇，这次给了 {len(pmids)} 篇")
     check_section(config, section, subsection)
+    # 页面传来的板块名同样不能白信：接口不只被自己的页面调用
+    for sec, sub in (section_map or {}).values():
+        check_section(config, sec, sub)
 
     existing = {a["pmid"] for a in library.all_articles(db_path)} & set(pmids)
     arts = entrez.efetch(pmids)
@@ -129,7 +136,8 @@ def collect(config, db_path: Path, pmids: list[str], *, journals,
     missing = [p for p in pmids if p not in {a["pmid"] for a in arts}]
 
     for a in arts:
-        hit = matchers.classify(config, a["title"])
+        given = (section_map or {}).get(a["pmid"])
+        hit = given or matchers.classify(config, a["title"])
         a["section"], a["subsection"] = hit if hit else (section, subsection)
         if section:
             a["section"] = section

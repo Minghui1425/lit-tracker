@@ -161,3 +161,51 @@ def test_collect_reports_when_pubmed_returns_nothing(cfg, db, monkeypatch):
     monkeypatch.setattr(entrez, "efetch", lambda ids, **kw: [])
     with pytest.raises(intake.IntakeError, match="没返回"):
         intake.collect(cfg, db, ["1"], journals=JournalIndex.empty())
+
+
+def test_section_map_keeps_the_classification_shown_on_the_report(cfg, db, monkeypatch):
+    """报告页勾选入库时，用户看到的是那页的归类，入库后不该变成另一个板块。"""
+    sec = cfg.sections[-1]
+    monkeypatch.setattr(entrez, "efetch",
+                        lambda ids, **kw: [_art("1", "A heart failure trial")])
+    intake.collect(cfg, db, ["1"], journals=JournalIndex.empty(),
+                   section_map={"1": (sec.name, sec.subsection_names[0])})
+    got = library.all_articles(db)[0]
+    assert (got["section"], got["subsection"]) == (sec.name, sec.subsection_names[0])
+
+
+def test_section_map_from_the_page_is_still_validated(cfg, db, monkeypatch):
+    """接口不只被自己的页面调用，板块名一样不能白信。"""
+    monkeypatch.setattr(entrez, "efetch",
+                        lambda ids, **kw: pytest.fail("板块名不合法就不该发请求"))
+    with pytest.raises(intake.IntakeError, match="没有板块"):
+        intake.collect(cfg, db, ["1"], journals=JournalIndex.empty(),
+                       section_map={"1": ("伪造的板块", "")})
+
+
+def test_manual_section_still_beats_the_section_map(cfg, db, monkeypatch):
+    """命令行显式给了 --section，就以它为准。"""
+    a, b = cfg.sections[0], cfg.sections[-1]
+    monkeypatch.setattr(entrez, "efetch",
+                        lambda ids, **kw: [_art("1", "A heart failure trial")])
+    intake.collect(cfg, db, ["1"], journals=JournalIndex.empty(),
+                   section=a.name, subsection=a.subsection_names[0],
+                   section_map={"1": (b.name, b.subsection_names[0])})
+    got = library.all_articles(db)[0]
+    assert got["section"] == a.name
+
+
+def test_add_tries_oa_by_default_from_the_cli(cfg, db, monkeypatch):
+    """入库顺手抓一次全文是默认行为，命令行与网页一致（--no-fetch 才跳过）。"""
+    import cli
+    monkeypatch.setattr(entrez, "efetch", lambda ids, **kw: [_art("1", "A heart failure trial")])
+    seen = {}
+
+    def fake_fetch(arts, pdf_dir, **kw):
+        seen["n"] = len(arts)
+        return {"fetched": 1}
+
+    monkeypatch.setattr(pdfs, "fetch_many", fake_fetch)
+    monkeypatch.setattr(cli, "_translate", lambda *a: None)
+    r = cli._import_refs(cfg, db, [{"pmid": "1", "doi": "", "title": ""}], fetch_pdf=True)
+    assert r["added"] == 1 and r["pdf_fetched"] == 1 and seen["n"] == 1

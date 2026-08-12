@@ -150,3 +150,34 @@ def test_pdf_flag_reflects_the_filesystem(cfg, db, tmp_path):
 
     flags = {a["pmid"]: a["pdf"] for a in _js_const(doc, "ARTS")}
     assert flags == {"1": 0, "2": 1}
+
+
+# ── 入库时间筛选 ─────────────────────────────────────────────────────────────
+
+def test_added_date_and_last_added_are_embedded(cfg, db, tmp_path):
+    """「最近一次入库」按 max(added_date) 算——一批文献的入库日期常摊在几天里。"""
+    import sqlite3
+    library.upsert(db, [article("1"), article("2")])
+    with sqlite3.connect(db) as c:
+        c.execute("UPDATE articles SET added_date='2026-06-13' WHERE pmid='2'")
+        c.execute("UPDATE articles SET added_date='2026-08-12' WHERE pmid='1'")
+    out = tmp_path / "library.html"
+    library_page.render(cfg, db, out, token="t")
+    page = out.read_text(encoding="utf-8")
+
+    assert 'const LAST_ADDED = "2026-08-12"' in page
+    arts = json.loads(re.search(r"^const ARTS = (\[.*?\]);$", page, re.S | re.M).group(1))
+    assert {a["pmid"]: a["added"] for a in arts} == {"1": "2026-08-12", "2": "2026-06-13"}
+
+
+def test_the_added_filter_is_wired_up_and_gets_reset(page):
+    assert "id=f-added" in page and "近 7 天" in page and "最近一次入库" in page
+    reset = page.split("function reset(", 1)[1].split("}", 1)[0]
+    assert "f-added" in reset            # 游离的筛选项是最难发现的「怎么少了几篇」
+
+
+def test_an_empty_library_still_renders(cfg, db, tmp_path):
+    """一篇都没有时 max() 没得可取，不能因此炸掉整页。"""
+    out = tmp_path / "library.html"
+    library_page.render(cfg, db, out, token="t")
+    assert 'const LAST_ADDED = ""' in out.read_text(encoding="utf-8")

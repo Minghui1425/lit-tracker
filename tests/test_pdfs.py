@@ -213,7 +213,7 @@ def test_fetch_many_skips_articles_that_already_have_a_pdf(pdf_dir, monkeypatch)
     monkeypatch.setattr(pdfs.entrez, "pmc_ids", lambda ids, **kw: {})
     monkeypatch.setattr(pdfs, "fetch_oa", lambda p, doi="", pmcid="": (MINI, "PMC(x)"))
     r = pdfs.fetch_many([{"pmid": "42482656", "doi": ""}, {"pmid": "42031428", "doi": ""}],
-                        pdf_dir, sleep=0)
+                        pdf_dir)
     assert (r["fetched"], r["skipped"], r["failed"]) == (1, 1, 0)
     assert pdfs.have(pdf_dir) == {"42482656", "42031428"}
 
@@ -221,6 +221,80 @@ def test_fetch_many_skips_articles_that_already_have_a_pdf(pdf_dir, monkeypatch)
 def test_fetch_many_reports_the_ones_it_could_not_get(pdf_dir, monkeypatch):
     monkeypatch.setattr(pdfs.entrez, "pmc_ids", lambda ids, **kw: {})
     monkeypatch.setattr(pdfs, "fetch_oa", lambda p, doi="", pmcid="": (None, ""))
-    r = pdfs.fetch_many([{"pmid": "42482656", "doi": ""}], pdf_dir, sleep=0)
+    r = pdfs.fetch_many([{"pmid": "42482656", "doi": ""}], pdf_dir)
     assert (r["fetched"], r["failed"]) == (0, 1)
     assert r["detail"] == [{"pmid": "42482656", "ok": False, "source": ""}]
+
+
+def test_one_articles_failure_does_not_sink_the_batch(pdf_dir, monkeypatch):
+    """并发跑的时候，某一篇的意外异常不该让整批中断。"""
+    monkeypatch.setattr(pdfs.entrez, "pmc_ids", lambda ids, **kw: {})
+
+    def flaky(pmid, doi="", pmcid=""):
+        if pmid == "1":
+            raise RuntimeError("出版商把连接掐了")
+        return MINI, "PMC(x)"
+
+    monkeypatch.setattr(pdfs, "fetch_oa", flaky)
+    r = pdfs.fetch_many([{"pmid": "1", "doi": ""}, {"pmid": "2", "doi": ""}], pdf_dir)
+    assert (r["fetched"], r["failed"]) == (1, 1)
+    assert pdfs.have(pdf_dir) == {"2"}
+
+
+def test_results_keep_the_input_order(pdf_dir, monkeypatch):
+    """并发之后仍要能按顺序对上——detail 是给用户看「哪几篇没拿到」的。"""
+    monkeypatch.setattr(pdfs.entrez, "pmc_ids", lambda ids, **kw: {})
+    monkeypatch.setattr(pdfs, "fetch_oa", lambda p, doi="", pmcid="": (None, ""))
+    arts = [{"pmid": str(i), "doi": ""} for i in range(1, 8)]
+    r = pdfs.fetch_many(arts, pdf_dir)
+    assert [d["pmid"] for d in r["detail"]] == [a["pmid"] for a in arts]
+
+
+# ── OA 直链的推导与取舍 ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("landing,want", [
+    ("https://pmc.ncbi.nlm.nih.gov/articles/PMC7654321/",
+     "https://europepmc.org/articles/PMC7654321?pdf=render"),
+    ("https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7654321/",
+     "https://europepmc.org/articles/PMC7654321?pdf=render"),
+    ("https://www.frontiersin.org/articles/10.3389/fimmu.2026.1/full",
+     "https://www.frontiersin.org/articles/10.3389/fimmu.2026.1/pdf"),
+    ("https://bmcmedicine.biomedcentral.com/articles/10.1186/s12916-026-1",
+     "https://bmcmedicine.biomedcentral.com/counter/pdf/10.1186/s12916-026-1.pdf"),
+])
+def test_landing_pages_are_rewritten_to_pdf_links(landing, want):
+    assert want in pdfs._pdf_urls(landing)
+
+
+def test_unknown_hosts_are_left_alone():
+    """推导不出来的就别乱猜，多发一次注定 403 的请求没意义。"""
+    url = "https://example.org/article/123"
+    assert pdfs._pdf_urls(url) == [url]
+
+
+def test_repository_copies_are_tried_before_the_publisher(monkeypatch):
+    """best_oa_location 常指向拦脚本的出版商官网，仓储副本才下得到。"""
+    monkeypatch.setenv("UNPAYWALL_EMAIL", "me@example.org")
+    monkeypatch.setattr(pdfs, "_unpaywall", lambda doi, email: {
+        "is_oa": True,
+        "oa_locations": [
+            {"url": "https://www.nature.com/articles/x.pdf", "host_type": "publisher"},
+            {"url_for_pdf": "https://repo.uni.edu/x.pdf", "host_type": "repository"},
+        ]})
+    tried = []
+
+    def fake_download(url, tries=3):
+        tried.append(url)
+        return MINI if "repo.uni.edu" in url else None
+
+    monkeypatch.setattr(pdfs, "_download", fake_download)
+    data, src = pdfs.fetch_oa("1", doi="10.1/x")
+    assert data == MINI and "repository" in src
+    assert tried[0] == "https://repo.uni.edu/x.pdf"
+
+
+def test_no_unpaywall_email_means_no_lookup(monkeypatch):
+    monkeypatch.delenv("UNPAYWALL_EMAIL", raising=False)
+    monkeypatch.setattr(pdfs, "_unpaywall",
+                        lambda *a, **k: pytest.fail("没配邮箱就不该去查 Unpaywall"))
+    assert pdfs.fetch_oa("1", doi="10.1/x") == (None, "")

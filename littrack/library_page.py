@@ -184,7 +184,12 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
         "citedby": _pmid_list(a.get("cited_by")), "cites": _pmid_list(a.get("cites")),
         "cc": a.get("citation_count"), "icc": a.get("influential_count"),
         "pdf": 1 if a["pmid"] in has_pdf else 0,
+        "added": a.get("added_date") or "",
     } for a in arts])
+
+    # 「最近一次入库」的那天。入库是分散在连续几天里的（一批周报的文献常摊在两三天），
+    # 所以这里取 max(added_date) 当天；想覆盖整批用「近 7 天」。
+    last_added = max((a.get("added_date") or "" for a in arts), default="")
 
     # 年 → 该年出现过的月份，用于「年份」联动「月份」下拉
     ym: dict[str, set] = {}
@@ -249,6 +254,7 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
     all_jrns_js = _json_for_script(journals)
 
     projects_js = _json_for_script([p["name"] for p in projects])
+    last_added_js = _json_for_script(last_added)
     token_js = _json_for_script(token)
     sec_opts = "".join(f'<option value="{_esc(s.name)}">{_esc(s.name)}</option>'
                        for s in config.sections)
@@ -296,6 +302,11 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
     <button class=btn onclick="closeAdd()">取消</button>
     <button class="btn btn-go" id=add-go onclick="doAdd()">添加</button>
   </div>
+  <p style="margin:14px 0 6px">或<b>批量导入</b> EndNote / Zotero 导出的文件
+     （RIS / nbib / BibTeX / EndNote XML / CSL JSON）。文件里没写 PMID 的记录
+     会按 DOI、再按标题回 PubMed 查，条数多时要等一会儿。上面选的板块同样适用。</p>
+  <input type=file id=add-file accept=".ris,.nbib,.bib,.xml,.json,.enw,.txt"
+         onchange="doImport()">
 </div>
 
 <h1>{_esc(config.project_name)} · 收藏库</h1>
@@ -363,7 +374,13 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
         <option value="1">有 PDF</option><option value="0">无 PDF</option></select></div>
     <button class="btn btn-r" onclick="fetchOa(event)"
             title="对勾选的文献试着免费下载全文（PMC / Unpaywall）；订阅刊多半抓不到，需自行下载后拖入">抓取 OA 全文</button>
-    <span style="font-size:11px;color:#aaa">把 PDF 拖到任意一行即可挂上全文</span>
+    <span class=vr></span>
+    <!-- 按入库时间筛「最近收进来的」。发表日期回答「这文章新不新」，入库时间回答
+         「我什么时候收的」——刚跑完一期周报想回看这次收了什么，要的是后者。 -->
+    <div class=grp><label>入库时间</label>
+      <select id=f-added onchange="apply()"><option value="">全部</option>
+        <option value="7">近 7 天</option><option value="30">近 30 天</option>
+        <option value="last">最近一次入库</option></select></div>
   </div>
 </div>
 
@@ -384,6 +401,7 @@ const SECJRNS = {sec_jrns_js};        // 板块 → 库里真有的期刊
 const ALLJRNS = {all_jrns_js};
 const YM = {ym_js};
 const PROJECTS = {projects_js};
+const LAST_ADDED = {last_added_js};    // max(added_date)，「最近一次入库」用
 const PORT = {port};
 const TOKEN = {token_js};
 // 从 http://127.0.0.1:PORT/ 打开时用同源相对路径；直接双击 file:// 打开时回落到绝对地址
@@ -418,12 +436,21 @@ function onYear(){{
 function apply(){{
   const g=i=>document.getElementById(i).value;
   const sec=g('f-sec'), sub=g('f-sub'), yr=g('f-year'), mo=g('f-month'), jr=g('f-jrn'),
-        tier=g('f-tier'), prj=g('f-prj'), pdf=g('f-pdf'),
+        tier=g('f-tier'), prj=g('f-prj'), pdf=g('f-pdf'), addedF=g('f-added'),
         kw=g('f-kw').toLowerCase(), abs=g('f-abs').toLowerCase(),
         rts=[...document.querySelectorAll('.rcb:checked')].map(c=>c.value),
         tps=[...document.querySelectorAll('.tcb:checked')].map(c=>c.value),
         ifr=[...document.querySelectorAll('.icb:checked')].map(c=>c.value),
         cir=[...document.querySelectorAll('.ccb:checked')].map(c=>c.value);
+  // 入库时间的下界（含）。added 是 YYYY-MM-DD 的日期粒度，按字符串比就够了。
+  let addedFrom = '';
+  if(addedF==='last') addedFrom = LAST_ADDED;
+  else if(addedF){{
+    const d=new Date();
+    d.setDate(d.getDate()-(parseInt(addedF,10)-1));      // 近 7 天 = 含今天的 7 天
+    addedFrom = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')
+                +'-'+String(d.getDate()).padStart(2,'0');
+  }}
   view = ARTS.filter(a=>{{
     let pOk = true;
     if(prj==='__none__') pOk = !a.proj || a.proj.length===0;
@@ -452,12 +479,13 @@ function apply(){{
            (!mo||a.month===mo) && (!jr||a.journal===jr) && (!tier||a.q===tier) && iOk && cOk &&
            (!rts.length||rts.includes(a.rating)) && (!tps.length||tps.includes(a.type)) &&
            (!kw|| (a.title+a.zh).toLowerCase().includes(kw)) &&
-           (!abs|| (a.abs||'').toLowerCase().includes(abs)) && pOk;
+           (!abs|| (a.abs||'').toLowerCase().includes(abs)) &&
+           (!addedFrom || (a.added||'') >= addedFrom) && pOk;
   }});
   draw();
 }}
 function reset(){{
-  ['f-sec','f-sub','f-year','f-month','f-jrn','f-tier','f-prj','f-pdf']
+  ['f-sec','f-sub','f-year','f-month','f-jrn','f-tier','f-prj','f-pdf','f-added']
     .forEach(i=>document.getElementById(i).value='');
   document.getElementById('f-kw').value='';
   document.getElementById('f-abs').value='';
@@ -616,6 +644,45 @@ function doAdd(){{
       alert(L.join('\\n'));
       location.reload();
     }});
+}}
+// ── 批量导入 EndNote / Zotero 的导出文件 ──
+// 传文件**内容**而不是路径：服务端因此不需要有「去读用户磁盘上任意文件」的能力。
+function doImport(){{
+  const inp=document.getElementById('add-file'), f=inp.files[0];
+  if(!f) return;
+  if(f.size>8*1024*1024){{
+    alert('文件有 '+Math.round(f.size/1024/1024)+'MB，太大了。请在 Zotero/EndNote 里分批导出。');
+    inp.value=''; return;
+  }}
+  const btn=document.getElementById('add-go'), label=btn.textContent;
+  btn.disabled=true; btn.textContent='正在导入…';
+  const fr=new FileReader();
+  fr.onload=function(){{
+    post('/article/import',{{name:f.name,content:fr.result,
+                             section:document.getElementById('add-sec').value,
+                             subsection:document.getElementById('add-sub').value}})
+      .then(d=>{{
+        btn.disabled=false; btn.textContent=label; inp.value='';
+        if(!d) return;
+        const L=['✓ 按 '+d.format+' 解析出 '+d.records+' 条，落到 PMID '+d.resolved+' 篇',
+                 '新增 '+d.added+' 篇'];
+        if(d.updated) L.push('更新 '+d.updated+' 篇（原本就在库里，笔记与评级保留）');
+        if(d.pdf_fetched) L.push('顺带抓到 '+d.pdf_fetched+' 篇 OA 全文');
+        if(d.missing.length) L.push('PubMed 没有：'+d.missing.join('、'));
+        if(d.unresolved.length){{
+          L.push('没落到 PMID 的 '+d.unresolved.length+' 条（多半是书籍/网页/会议摘要）：');
+          d.unresolved.slice(0,10).forEach(u=>L.push('　? '+(u.title||u.doi||'（无标题）')));
+          if(d.unresolved.length>10) L.push('　…还有 '+(d.unresolved.length-10)+' 条');
+        }}
+        alert(L.join('\\n'));
+        location.reload();
+      }});
+  }};
+  fr.onerror=function(){{
+    btn.disabled=false; btn.textContent=label; inp.value='';
+    alert('文件读不出来：'+(fr.error&&fr.error.message||'未知错误'));
+  }};
+  fr.readAsText(f);          // 导出文件都是文本；编码非 UTF-8 时由服务端报错
 }}
 function setRating(pmid,s){{
   const a=ARTS.find(x=>x.pmid===pmid); const val=(a.rating===s)?'':s;

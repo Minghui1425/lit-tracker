@@ -175,3 +175,20 @@ def test_pdf_open_requires_token_and_a_valid_pmid(server, monkeypatch):
     status, msg = _req(base + "/pdf/open", data={"pmid": "2"},
                        token=token, method="POST")
     assert status == 500 and "还没有 PDF" in msg
+
+
+def test_the_new_write_routes_also_need_the_token(server):
+    """报告页与批量导入这两条入库路径，同样不能只凭「打到 127.0.0.1」就放行。"""
+    base, token, _, _ = server
+    for path, payload in (("/article/add-from-report",
+                           {"items": [{"pmid": "1", "section": ""}]}),
+                          ("/article/import", {"name": "x.ris", "content": "TY  - JOUR"})):
+        assert _req(base + path, data=payload, method="POST")[0] == 403
+        assert _req(base + path, data=payload, token="wrong", method="POST")[0] == 403
+
+
+def test_import_rejects_an_empty_file_before_touching_pubmed(server):
+    base, token, _, _ = server
+    status, body = _req(base + "/article/import", token=token, method="POST",
+                        data={"name": "empty.ris", "content": "   "})
+    assert status == 500 and "空" in body

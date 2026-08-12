@@ -16,8 +16,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -111,50 +113,141 @@ def trash(pdf_dir: Path, pmid: str) -> bool:
 
 # ─── OA 全文抓取 ──────────────────────────────────────────────────────────────
 
-def _download(url: str) -> bytes | None:
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
+
+# 出版商官网普遍拦截非浏览器客户端（Cloudflare / 反爬），脚本永远拿不到。这份名单
+# 只用来给 OA location 排序：仓储副本优先、出版商官网垫底，不是黑名单。
+_PUBLISHER_HOSTS = ("elsevier", "sciencedirect", "wiley", "cell.com", "thelancet",
+                    "springer", "nature.com", "jamanetwork", "acs.org", "tandfonline",
+                    "bmj.com", "oup.com", "mdpi.com", "pnas.org", "ascopubs", "ovid.com")
+
+_local = threading.local()
+
+
+def _session() -> requests.Session:
+    """每线程一个 Session。
+
+    连接复用是必需的，不是优化：逐次新建 TLS 连接时 api.unpaywall.org 会大量
+    SSLEOFError（"EOF occurred in violation of protocol"），而每次失败还要耗掉
+    requests 内部几十秒的重试。改成 Session + 退避后，实测一百多篇的查询从
+    「几分钟才跑完几篇」变成半分钟跑完。
+    """
+    s = getattr(_local, "s", None)
+    if s is None:
+        s = requests.Session()
+        s.headers["User-Agent"] = _UA
+        _local.s = s
+    return s
+
+
+def _download(url: str, tries: int = 3) -> bytes | None:
     """下载并确认真的是 PDF（出版商常返回 HTML 拦截页 + 200）。"""
-    try:
-        r = requests.get(url, timeout=90, allow_redirects=True,
-                         headers={"User-Agent": f"Mozilla/5.0 ({entrez.TOOL})"})
-        if r.status_code != 200 or r.content[:4] != _MAGIC:
-            return None
-        return r.content
-    except requests.RequestException:
-        return None
+    for attempt in range(tries):
+        try:
+            r = _session().get(url, timeout=60, allow_redirects=True)
+            if r.status_code == 200 and r.content[:4] == _MAGIC:
+                return r.content
+            return None                 # 明确的非 PDF 响应，重试没有意义
+        except requests.RequestException:
+            if attempt == tries - 1:
+                return None
+            time.sleep(2 ** attempt)
+    return None
+
+
+def _pdf_urls(url: str) -> list[str]:
+    """把 OA 落地页地址改写成可能的 PDF 直链。
+
+    Unpaywall 的 location 常常只给文章页（url）而没有 url_for_pdf，但多数纯 OA
+    平台的 PDF 地址是可推导的。只覆盖不拦脚本的那几家——Elsevier/Wiley 之类推导
+    出来也是 403，白费一次请求。
+    """
+    base = url.split("?")[0].rstrip("/")
+
+    # PMC：location 里常直接带 PMCID，等于白送——不必再问 elink（NCBI 抽风时，
+    # 这条是唯一的 PMC 来源）。域名要认全：新版是 pmc.ncbi.nlm.nih.gov/articles/PMC…，
+    # 旧版是 …/pmc/articles/PMC…，只认一种会白扔掉一批现成的 PMCID。
+    m = re.search(r"(PMC\d+)", base)
+    if m and ("pmc.ncbi.nlm.nih.gov" in base or "europepmc.org" in base
+              or "/pmc/articles/" in base):
+        return [f"https://europepmc.org/articles/{m.group(1)}?pdf=render", url]
+
+    out = [url]
+    if "frontiersin.org" in url and base.endswith("/full"):
+        out.append(base[:-len("/full")] + "/pdf")       # /full → /pdf，不是追加
+    elif "biomedcentral.com" in url and "/articles/" in base:
+        out.append(base.replace("/articles/", "/counter/pdf/") + ".pdf")
+    return out
+
+
+def _unpaywall(doi: str, email: str) -> dict | None:
+    """查 Unpaywall。404（未收录）与查不到都返回 None。"""
+    for attempt in range(4):
+        try:
+            r = _session().get(f"https://api.unpaywall.org/v2/{doi}",
+                               params={"email": email}, timeout=15)
+            if r.status_code == 404:            # 没收录，不是错误
+                return None
+            # 5xx 基本都是限流（批量跑时成片出现 500），退避重试而不是当失败
+            if r.status_code >= 500:
+                raise requests.HTTPError(f"{r.status_code} from Unpaywall")
+            r.raise_for_status()
+            return r.json()
+        except (requests.RequestException, ValueError) as e:
+            if attempt == 3:
+                log.warning(f"Unpaywall 查询失败：{entrez.mask_secret(e)}")
+                return None
+            time.sleep(3 * (attempt + 1) ** 2)          # 3s / 12s / 27s
+    return None
 
 
 def fetch_oa(pmid: str, doi: str = "", pmcid: str = "") -> tuple:
     """尝试免费拿到某篇的 PDF，返回 (bytes|None, 来源说明)。
 
-    两条路：① PMC（Europe PMC 的 ?pdf=render 直出 PDF）；② Unpaywall 的 best OA
-    location 直链（需 .env 配 UNPAYWALL_EMAIL，未配则跳过）。订阅刊多数两条路都拿
-    不到，这是预期结果，不是 bug——那些仍靠手动拖进页面。
+    两条路：① PMC（Europe PMC 的 ?pdf=render 直出 PDF）；② Unpaywall 列出的 OA
+    副本（需 .env 配 UNPAYWALL_EMAIL，未配则跳过）。订阅刊多数两条路都拿不到，
+    这是预期结果，不是 bug——那些仍靠手动拖进页面。
     """
     if pmcid:
         data = _download(f"https://europepmc.org/articles/{pmcid}?pdf=render")
         if data:
             return data, f"PMC({pmcid})"
     email = os.environ.get("UNPAYWALL_EMAIL", "").strip()
-    if doi and email:
-        try:
-            j = requests.get(f"https://api.unpaywall.org/v2/{doi}",
-                             params={"email": email}, timeout=30).json()
-            loc = j.get("best_oa_location") or {}
-            for url in (loc.get("url_for_pdf"), loc.get("url")):
-                if not url:
+    if not doi:
+        return None, ""
+    if not email:
+        log.debug("未设置 UNPAYWALL_EMAIL，跳过 Unpaywall 这条路")
+        return None, ""
+
+    j = _unpaywall(doi, email)
+    if not j or not j.get("is_oa"):
+        return None, ""
+
+    # 遍历**全部** oa_locations，不只 best_oa_location：best 往往指向出版商官网，
+    # 而那些站点一律拦脚本；同一篇文章常另有 PMC / 机构仓储副本可以直接下。
+    def _rank(loc):
+        u = (loc.get("url_for_pdf") or loc.get("url") or "").lower()
+        return (1 if any(h in u for h in _PUBLISHER_HOSTS) else 0,   # 仓储优先
+                0 if loc.get("url_for_pdf") else 1)                  # 直链优先
+
+    seen = set()
+    for loc in sorted(j.get("oa_locations") or [], key=_rank):
+        for cand in (loc.get("url_for_pdf"), loc.get("url")):
+            if not cand:
+                continue
+            for url in _pdf_urls(cand):
+                if url in seen:
                     continue
+                seen.add(url)
                 data = _download(url)
                 if data:
                     return data, f'Unpaywall({loc.get("host_type") or "oa"})'
-        except (requests.RequestException, ValueError) as e:
-            log.warning(f"Unpaywall 查询失败：{entrez.mask_secret(e)}")
-    elif doi and not email:
-        log.debug("未设置 UNPAYWALL_EMAIL，跳过 Unpaywall 这条路")
     return None, ""
 
 
 def fetch_many(articles: list[dict], pdf_dir: Path, *,
-               skip_existing: bool = True, sleep: float = 0.3) -> dict:
+               skip_existing: bool = True, workers: int = 2) -> dict:
     """批量抓 OA 全文。articles 里每项要有 pmid，doi 可缺。"""
     got = have(pdf_dir)
     todo = [a for a in articles if not (skip_existing and a["pmid"] in got)]
@@ -163,25 +256,32 @@ def fetch_many(articles: list[dict], pdf_dir: Path, *,
                 "skipped": len(articles), "detail": []}
 
     pmc = entrez.pmc_ids([a["pmid"] for a in todo])
-    fetched = failed = 0
-    detail = []
-    for a in todo:
-        data, src = fetch_oa(a["pmid"], a.get("doi") or "", pmc.get(a["pmid"], ""))
-        if data:
-            try:
-                save(pdf_dir, a["pmid"], data)
-            except PdfError as e:
-                failed += 1
-                detail.append({"pmid": a["pmid"], "ok": False, "source": "", "error": str(e)})
-                continue
-            fetched += 1
-            detail.append({"pmid": a["pmid"], "ok": True, "source": src})
-            log.info(f"  ✓ {a['pmid']}  {src}  {len(data)//1024}KB")
-        else:
-            failed += 1
-            detail.append({"pmid": a["pmid"], "ok": False, "source": ""})
-        time.sleep(sleep)
-    return {"requested": len(articles), "fetched": fetched, "failed": failed,
+
+    # 并发 2 路。串行时单篇失败要走完重试退避（几十秒），几百篇能拖一个多小时；
+    # 但 4 路会把 Unpaywall 打到成片返回 500（限流），2 路实测稳定。
+    #
+    # 落盘必须在 worker 里做、只回传状态：Executor.map 会把**所有**返回值缓冲住，
+    # 若回传 PDF bytes，全库跑一次就是几百份 PDF（单份可达几十 MB）同时堆在内存里。
+    def _one(a):
+        pmid = a["pmid"]
+        try:
+            data, src = fetch_oa(pmid, a.get("doi") or "", pmc.get(pmid, ""))
+        except Exception as e:              # noqa: BLE001  一篇的意外不该中断整批
+            return {"pmid": pmid, "ok": False, "source": "", "error": str(e)}
+        if not data:
+            return {"pmid": pmid, "ok": False, "source": ""}
+        try:
+            save(pdf_dir, pmid, data)
+        except (PdfError, OSError) as e:
+            return {"pmid": pmid, "ok": False, "source": "", "error": str(e)}
+        log.info(f"  ✓ {pmid}  {src}  {len(data)//1024}KB")
+        return {"pmid": pmid, "ok": True, "source": src}
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        detail = list(pool.map(_one, todo))
+    fetched = sum(1 for d in detail if d["ok"])
+    return {"requested": len(articles), "fetched": fetched,
+            "failed": len(detail) - fetched,
             "skipped": len(articles) - len(todo), "detail": detail}
 
 

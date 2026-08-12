@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -101,12 +102,17 @@ def esearch(term: str, retmax: int = RETMAX) -> list[str]:
     return ids
 
 
-def pmc_ids(pmids: list[str], batch: int = 180) -> dict:
+def pmc_ids(pmids: list[str], batch: int = 50) -> dict:
     """PMID → PMCID。没有 PMC 版本的不出现在结果里。
 
     id 必须**重复传参**（id=1&id=2），不能逗号拼接：逗号形式会被 NCBI 合并成一个
     linkset，links 是所有输入的并集，按位置回填就会把别人的 PMCID 安到本篇头上，
     进而下载到完全不相干的 PDF。
+
+    每批 50 是上限量级：实测 180 个 id 时 elink 必定在响应中途断开
+    （"Response ended prematurely"），GET/POST 都一样。这个失败是**静默**的——
+    异常只记一行日志，PMC 整条路退化成空 dict，抓取照跑但只剩 Unpaywall，
+    表现为「OA 命中率忽然很低」而不是报错，所以宁可多发几次请求。
     """
     out: dict[str, str] = {}
     for i in range(0, len(pmids), batch):
@@ -116,18 +122,48 @@ def pmc_ids(pmids: list[str], batch: int = 180) -> dict:
         email = _email()
         if email:
             params["email"] = email
-        try:
-            r = _SESSION.get(ENTREZ_BASE + "elink.fcgi", params=params, timeout=40)
-            r.raise_for_status()
-            for ls in r.json().get("linksets", []):
-                src = (ls.get("ids") or [None])[0]
-                for db in ls.get("linksetdbs", []):
-                    if db.get("linkname") == "pubmed_pmc" and db.get("links"):
-                        out[str(src)] = "PMC" + str(db["links"][0])
-        except (requests.RequestException, ValueError) as e:
-            log.warning(f"elink 查 PMCID 失败：{mask_secret(e)}")
+        for attempt in range(3):
+            try:
+                r = _SESSION.get(ENTREZ_BASE + "elink.fcgi", params=params, timeout=40)
+                r.raise_for_status()
+                # 必须 strict=False：NCBI 报错时会把 C++ 异常原文塞进 JSON 字符串，
+                # 里面含**真实换行符**，标准解析直接 "Invalid control character"，
+                # 连它到底是不是错误都看不出来。
+                payload = json.loads(r.text, strict=False)
+                if payload.get("ERROR"):
+                    raise ValueError(str(payload["ERROR"]).strip().splitlines()[-1])
+                for ls in payload.get("linksets", []):
+                    src = (ls.get("ids") or [None])[0]
+                    for db in ls.get("linksetdbs", []):
+                        if db.get("linkname") == "pubmed_pmc" and db.get("links"):
+                            out[str(src)] = "PMC" + str(db["links"][0])
+                break
+            except (requests.RequestException, ValueError) as e:
+                # NCBI 后端会临时抽风（"Read failed: EOF, the other side has
+                # unexpectedly closed connection"），退避重试基本能过；不重试的话
+                # 一次瞬时故障就让这一批的 PMC 版本全部查不到。
+                if attempt == 2:
+                    log.warning(f"elink 查 PMCID 失败（这 {len(chunk)} 篇跳过 PMC 这条路）："
+                                f"{mask_secret(e)}")
+                else:
+                    time.sleep(3 * (attempt + 1))
         time.sleep(0.2)
     return out
+
+
+def pmid_by_doi(doi: str) -> str:
+    """DOI → PMID，查不到返回空串。
+
+    用 `[AID]`（Article Identifier）而不是把 DOI 当普通词扔进 All Fields：后者会
+    命中「正文或参考文献里提到这个 DOI」的其他文章。DOI 里的连字符、括号在检索式里
+    无特殊含义，加引号即可。
+    """
+    doi = (doi or "").strip().rstrip(".")
+    if not doi:
+        return ""
+    ids = esearch(f'"{doi}"[AID]', retmax=2)
+    # 同一 DOI 命中多篇基本只发生在数据脏的时候（同文重复收录），宁可不猜
+    return ids[0] if len(ids) == 1 else ""
 
 
 def efetch(pmids: list[str], batch: int = 200) -> list[dict]:
