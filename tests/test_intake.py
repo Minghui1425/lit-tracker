@@ -209,3 +209,29 @@ def test_add_tries_oa_by_default_from_the_cli(cfg, db, monkeypatch):
     monkeypatch.setattr(cli, "_translate", lambda *a: None)
     r = cli._import_refs(cfg, db, [{"pmid": "1", "doi": "", "title": ""}], fetch_pdf=True)
     assert r["added"] == 1 and r["pdf_fetched"] == 1 and seen["n"] == 1
+
+
+def test_collect_reports_how_many_oa_attempts_it_made(cfg, db, monkeypatch):
+    """抓到 0 篇与「压根没试」要能分开——否则页面只敢在抓到时提示，
+    一篇没拿到时整行不显示，看着像这功能没跑。"""
+    monkeypatch.setattr(entrez, "efetch",
+                        lambda ids, **kw: [_art(p, f"Trial {p}") for p in ids])
+    monkeypatch.setattr(pdfs, "fetch_many", lambda arts, d, **kw: {"fetched": 0})
+    r = intake.collect(cfg, db, ["1", "2"], journals=JournalIndex.empty(), fetch_pdf=True)
+    assert (r["pdf_tried"], r["pdf_fetched"]) == (2, 0)
+
+    # 没要求抓的时候两个都是 0
+    r2 = intake.collect(cfg, db, ["1"], journals=JournalIndex.empty())
+    assert (r2["pdf_tried"], r2["pdf_fetched"]) == (0, 0)
+
+
+def test_oa_attempts_are_counted_even_when_fetching_blows_up(cfg, db, monkeypatch):
+    """抓取整个失败时文献照样收进来了，但「试过」这件事仍要如实报出去。"""
+    monkeypatch.setattr(entrez, "efetch", lambda ids, **kw: [_art("1", "A trial")])
+
+    def boom(*a, **kw):
+        raise RuntimeError("出版商把连接掐了")
+
+    monkeypatch.setattr(pdfs, "fetch_many", boom)
+    r = intake.collect(cfg, db, ["1"], journals=JournalIndex.empty(), fetch_pdf=True)
+    assert r["added"] == 1 and (r["pdf_tried"], r["pdf_fetched"]) == (1, 0)

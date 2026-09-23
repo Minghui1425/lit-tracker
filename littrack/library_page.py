@@ -633,6 +633,15 @@ function onAddSec(){{
     const o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o);
   }});
 }}
+// 入库后那次「顺手抓 OA」的结果。抓到 0 篇同样要出一行——只在抓到时才提示的话，
+// 一篇没拿到时整行不显示，看着就像这功能压根没跑。
+function oaLine(d){{
+  if(!d.pdf_tried) return [];
+  return [d.pdf_fetched
+    ? '　其中 '+d.pdf_fetched+' 篇已自动挂上 OA 全文'
+    : '　试抓了 '+d.pdf_tried+' 篇的 OA 全文，一篇也没拿到'
+      +'（订阅刊、出版商拦脚本都属正常，自行下载后拖进来即可）'];
+}}
 function doAdd(){{
   const q=document.getElementById('add-q').value.trim();
   if(!q) return alert('请输入文章标题或 PMID');
@@ -645,9 +654,7 @@ function doAdd(){{
       btn.disabled=false; btn.textContent='添加';
       if(!d) return;                       // 出错时 post 已经弹过原因了
       const L=['✓ 新增 '+d.added+' 篇'];
-      if(d.added) L.push(d.pdf_fetched
-        ? '　其中 '+d.pdf_fetched+' 篇已自动挂上 OA 全文'
-        : '　没找到免费全文（订阅刊需自行下载后拖进来）');
+      oaLine(d).forEach(x=>L.push(x));
       if(d.updated) L.push('更新 '+d.updated+' 篇（已在库中，笔记与评级保留）');
       if(d.missing.length) L.push('PubMed 没有：'+d.missing.join('、'));
       alert(L.join('\\n'));
@@ -676,7 +683,7 @@ function doImport(){{
         const L=['✓ 按 '+d.format+' 解析出 '+d.records+' 条，落到 PMID '+d.resolved+' 篇',
                  '新增 '+d.added+' 篇'];
         if(d.updated) L.push('更新 '+d.updated+' 篇（原本就在库里，笔记与评级保留）');
-        if(d.pdf_fetched) L.push('顺带抓到 '+d.pdf_fetched+' 篇 OA 全文');
+        oaLine(d).forEach(x=>L.push(x));
         if(d.missing.length) L.push('PubMed 没有：'+d.missing.join('、'));
         if(d.unresolved.length){{
           L.push('没落到 PMID 的 '+d.unresolved.length+' 条（多半是书籍/网页/会议摘要）：');

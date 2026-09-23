@@ -126,7 +126,11 @@ function addToLibrary(){
     var msg='已加入收藏库 '+d.added+' 篇';
     if(d.updated) msg+='，'+d.updated+' 篇原本就在库里（已刷新元数据，笔记与评级保留）';
     if(d.missing&&d.missing.length) msg+='\\nPubMed 没有这些 PMID：'+d.missing.join(' ');
-    if(d.pdf_fetched) msg+='\\n顺带抓到 '+d.pdf_fetched+' 篇 OA 全文';
+    // 抓到 0 篇也要说一句：只在抓到时才提示的话，一篇没拿到时整行不显示，
+    // 看着就像这功能压根没跑
+    if(d.pdf_tried) msg+= d.pdf_fetched
+      ? '\\n顺带抓到 '+d.pdf_fetched+' 篇 OA 全文'
+      : '\\n试抓了 '+d.pdf_tried+' 篇的 OA 全文，一篇也没拿到（订阅刊、出版商拦脚本都属正常）';
     alert(msg);
   }).catch(function(e){
     fallback(items.map(function(i){return i.pmid;}), e);

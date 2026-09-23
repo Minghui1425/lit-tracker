@@ -139,7 +139,8 @@ def _import_refs(cfg, db_path: Path, items: list, *, section: str = "",
     """
     from littrack import intake, refs
     r = refs.resolve(items, on_each=on_each)
-    out = {**r, "added": 0, "updated": 0, "pdf_fetched": 0, "missing": []}
+    out = {**r, "added": 0, "updated": 0, "pdf_fetched": 0, "pdf_tried": 0,
+           "missing": []}
     idx = JournalIndex.load(BASE / "if_data.json")
     step = intake.MAX_PMIDS
     for i in range(0, len(r["pmids"]), step):
@@ -149,6 +150,7 @@ def _import_refs(cfg, db_path: Path, items: list, *, section: str = "",
         out["added"] += res["added"]
         out["updated"] += res["updated"]
         out["pdf_fetched"] += res["pdf_fetched"]
+        out["pdf_tried"] += res["pdf_tried"]
         out["missing"] += res["missing"]
     return out
 
@@ -408,7 +410,7 @@ def _serve(cfg, db_path: Path, idx_path: Path):
                                        subsection=(d.get("subsection") or "").strip(),
                                        translate=_translate, fetch_pdf=True)
                     res = {k: r[k] for k in ("added", "updated", "existing",
-                                             "missing", "pdf_fetched")}
+                                             "missing", "pdf_fetched", "pdf_tried")}
                 elif self.path == "/article/import":
                     # EndNote / Zotero 导出文件：页面把文件内容当文本发上来（不传路径，
                     # 服务端也就不必去读用户磁盘上的任意文件）。
@@ -432,6 +434,7 @@ def _serve(cfg, db_path: Path, idx_path: Path):
                            "resolved": len(r["pmids"]), "how": r["how"],
                            "added": r["added"], "updated": r["updated"],
                            "missing": r["missing"], "pdf_fetched": r["pdf_fetched"],
+                           "pdf_tried": r["pdf_tried"],
                            "unresolved": [{"title": u["title"], "doi": u["doi"],
                                            "why": u["why"]} for u in r["unresolved"]]}
                 elif self.path == "/article/add-from-report":
@@ -454,7 +457,7 @@ def _serve(cfg, db_path: Path, idx_path: Path):
                                        section_map=smap, translate=_translate,
                                        fetch_pdf=True)
                     res = {k: r[k] for k in ("added", "updated", "existing",
-                                             "missing", "pdf_fetched")}
+                                             "missing", "pdf_fetched", "pdf_tried")}
                 elif self.path.startswith("/pdf/"):
                     from littrack import pdfs
                     pdf_dir = pdfs.dir_for(db_path)
@@ -703,9 +706,10 @@ def main():
                  f"你的笔记与评级保留）" if updated else ""))
         if res["missing"]:
             print(f"    PubMed 没有这些 PMID：{'、'.join(res['missing'])}")
-        if not args.no_fetch and added:
-            print(f"    其中 {res['pdf_fetched']} 篇已自动挂上 OA 全文"
-                  + ("" if res["pdf_fetched"] else "（订阅刊没有 OA 版本，需自行下载）"))
+        if res["pdf_tried"]:
+            print(f"    试抓了 {res['pdf_tried']} 篇的 OA 全文，"
+                  + (f"挂上 {res['pdf_fetched']} 篇" if res["pdf_fetched"]
+                     else "一篇也没拿到（订阅刊、出版商拦脚本都属正常，需自行下载）"))
         unmatched = []
         for a in arts:
             if a["section"]:
@@ -803,8 +807,10 @@ def main():
                  if r["updated"] else ""))
         if r["missing"]:
             print(f"    PubMed 没有这些 PMID：{'、'.join(r['missing'])}")
-        if not args.no_fetch:
-            print(f"    顺带抓到 {r['pdf_fetched']} 篇 OA 全文")
+        if r["pdf_tried"]:
+            print(f"    试抓了 {r['pdf_tried']} 篇的 OA 全文，"
+                  + (f"挂上 {r['pdf_fetched']} 篇" if r["pdf_fetched"]
+                     else "一篇也没拿到（订阅刊、出版商拦脚本都属正常，需自行下载）"))
         print(f"  收藏库页面：{idx_path}")
         return
 

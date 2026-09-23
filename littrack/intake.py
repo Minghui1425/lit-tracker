@@ -118,9 +118,12 @@ def collect(config, db_path: Path, pmids: list[str], *, journals,
     section_map 是 {pmid: (板块, 子板块)}，给报告页的「加入收藏库」用——那些文章
     在生成报告时就已经归好类了，直接沿用，用户眼前看到的分类才不会入库后变样。
 
-    返回 {"articles", "added", "updated", "existing", "missing", "pdf_fetched"}：
+    返回 {"articles", "added", "updated", "existing", "missing",
+          "pdf_fetched", "pdf_tried"}：
       existing 是本次之前就在库里的（会按当前配置重新归类，笔记与评级保留），
       missing  是 PubMed 没返回的（PMID 写错或已被撤下）。
+      pdf_tried 是这次试抓了几篇全文——抓到 0 篇与「压根没试」必须能区分开，
+      否则调用方只能在抓到时才敢提示，一篇没抓到时整行不显示，看着像没跑。
     """
     if len(pmids) > MAX_PMIDS:
         raise IntakeError(f"一次最多添加 {MAX_PMIDS} 篇，这次给了 {len(pmids)} 篇")
@@ -155,10 +158,11 @@ def collect(config, db_path: Path, pmids: list[str], *, journals,
     # 只试**这次新增**的——已在库的要么早有 PDF，要么之前就试过没拿到，重试一遍多半
     # 还是白等。抓不到是常态（订阅刊），所以这里的任何失败都吞掉：全文是附加品，
     # 绝不能让它把「文献已经收进来了」这件事搞成一次失败。
-    pdf_fetched = 0
+    pdf_fetched = pdf_tried = 0
     if fetch_pdf:
         fresh = [a for a in arts if a["pmid"] not in existing]
         if fresh:
+            pdf_tried = len(fresh)
             try:
                 from . import pdfs
                 pdf_fetched = pdfs.fetch_many(fresh, pdfs.dir_for(db_path))["fetched"]
@@ -167,4 +171,4 @@ def collect(config, db_path: Path, pmids: list[str], *, journals,
 
     return {"articles": arts, "added": added, "updated": updated,
             "existing": sorted(existing), "missing": missing,
-            "pdf_fetched": pdf_fetched}
+            "pdf_fetched": pdf_fetched, "pdf_tried": pdf_tried}
