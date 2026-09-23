@@ -23,9 +23,14 @@ import time
 
 import requests
 
-from . import library
+from . import entrez, library
 
 log = logging.getLogger(__name__)
+
+# 绕开系统/环境里的代理（理由见 entrez.use_proxy()）。S2 直连可达，
+# 而本地代理一抖动就是成片的 SSLEOFError，看起来像 S2 在限流。
+_SESSION = requests.Session()
+_SESSION.trust_env = entrez.use_proxy()
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1/paper"
 _BATCH = 500          # /paper/batch 单次上限
@@ -60,7 +65,7 @@ def references(pmid: str) -> tuple[list[str], str]:
     waits = _waits()
     for attempt in range(len(waits) + 1):
         try:
-            r = requests.get(url, params={"fields": "externalIds", "limit": 500},
+            r = _SESSION.get(url, params={"fields": "externalIds", "limit": 500},
                              headers=_headers(), timeout=_TIMEOUT)
         except requests.exceptions.RequestException as e:
             log.debug(f"PMID {pmid} 请求异常：{e}")
@@ -98,7 +103,7 @@ def citation_counts(pmids: list[str]) -> dict[str, tuple]:
         waits = _waits()
         for attempt in range(len(waits) + 1):
             try:
-                r = requests.post(
+                r = _SESSION.post(
                     f"{S2_BASE}/batch",
                     params={"fields": "citationCount,influentialCitationCount"},
                     json={"ids": [f"PMID:{p}" for p in chunk]},

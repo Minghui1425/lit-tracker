@@ -112,6 +112,9 @@ def download(out_path: str | Path, *, merge: bool = False) -> dict:
     """
     import requests
 
+    # ⚠️ 这里**故意保留** requests 的默认代理行为（不设 trust_env=False）：
+    # raw.githubusercontent.com 在部分地区直连不通，本来就得靠系统代理。
+    # 其余出网的地方相反，一律绕开代理，见 entrez.use_proxy()。
     out = Path(out_path).expanduser()
     r = requests.get(_GITHUB_API, timeout=30,
                      headers={"Accept": "application/vnd.github.v3+json"})

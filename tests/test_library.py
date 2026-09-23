@@ -85,3 +85,58 @@ def test_sort_follows_config_order(cfg, db):
     ])
     order = [a["pmid"] for a in library.sorted_articles(cfg, library.all_articles(db))]
     assert order == ["3", "2", "1"]      # 板块序 > 子板块序 > 日期，日期不越级
+
+
+# ── 文章类型标签的人工覆盖 ───────────────────────────────────────────────────
+
+def test_pinned_type_survives_a_re_ingest(db):
+    """钉过的标签必须挡住重新入库——否则用户改一次、PubMed 盖回来一次。"""
+    library.upsert(db, [article("1", type_label="Article"),
+                        article("2", type_label="Article")])
+    library.set_type_override(db, "1", "Research Highlight")
+
+    library.upsert(db, [article("1", type_label="Article"),
+                        article("2", type_label="Review")])
+    got = {a["pmid"]: a["pub_type"] for a in library.all_articles(db)}
+    assert got == {"1": "Research Highlight", "2": "Review"}   # 没钉的照常跟着 PubMed 走
+
+
+def test_clear_override_lets_pubmed_win_again(db):
+    library.upsert(db, [article("1", type_label="Article")])
+    library.set_type_override(db, "1", "Guideline")
+    assert library.clear_type_override(db, "1") is True
+    assert library.clear_type_override(db, "1") is False      # 第二次没得撤
+
+    library.upsert(db, [article("1", type_label="Review")])
+    assert library.all_articles(db)[0]["pub_type"] == "Review"
+
+
+def test_listing_overrides_reports_what_was_pinned(db):
+    library.upsert(db, [article("1", title="某篇综述")])
+    library.set_type_override(db, "1", "Editorial")
+    rows = library.list_type_overrides(db)
+    assert len(rows) == 1
+    assert rows[0]["pmid"] == "1" and rows[0]["pub_type"] == "Editorial"
+    assert rows[0]["title"] == "某篇综述" and rows[0]["set_at"]
+
+
+def test_cannot_pin_an_article_that_is_not_in_the_library(db):
+    with pytest.raises(ValueError, match="没有 PMID"):
+        library.set_type_override(db, "999", "Review")
+
+
+def test_empty_label_is_refused(db):
+    library.upsert(db, [article("1")])
+    with pytest.raises(ValueError, match="不能为空"):
+        library.set_type_override(db, "1", "   ")
+
+
+def test_deleting_an_article_drops_its_override(db):
+    """否则日后重新收藏同一篇，会莫名其妙自带一个早就忘了的标签。"""
+    library.upsert(db, [article("1", type_label="Article")])
+    library.set_type_override(db, "1", "Research Highlight")
+    library.delete(db, ["1"])
+    assert library.list_type_overrides(db) == []
+
+    library.upsert(db, [article("1", type_label="Article")])
+    assert library.all_articles(db)[0]["pub_type"] == "Article"

@@ -95,3 +95,27 @@ def test_pmid_by_doi_on_empty_input_does_not_search(monkeypatch):
     monkeypatch.setattr(entrez, "esearch",
                         lambda *a, **k: pytest.fail("没有 DOI 就不该发请求"))
     assert entrez.pmid_by_doi("") == ""
+
+
+# ── 代理策略 ─────────────────────────────────────────────────────────────────
+
+def test_proxy_is_bypassed_by_default(monkeypatch):
+    """本地代理（Clash 之类）一抖动就是成片 SSLEOFError，且报错看不出与代理有关。"""
+    monkeypatch.delenv("LITTRACK_USE_PROXY", raising=False)
+    assert entrez.use_proxy() is False
+    assert entrez._SESSION.trust_env is False
+
+
+@pytest.mark.parametrize("val", ["1", "true", "YES"])
+def test_proxy_can_be_turned_back_on(monkeypatch, val):
+    """公司网络只开代理出口的，得有办法要回原来的行为。"""
+    monkeypatch.setenv("LITTRACK_USE_PROXY", val)
+    assert entrez.use_proxy() is True
+
+
+def test_oa_and_s2_sessions_bypass_the_proxy_too(monkeypatch):
+    from littrack import citations, pdfs
+    monkeypatch.delenv("LITTRACK_USE_PROXY", raising=False)
+    monkeypatch.setattr(pdfs._local, "s", None, raising=False)
+    assert pdfs._session().trust_env is False
+    assert citations._SESSION.trust_env is False

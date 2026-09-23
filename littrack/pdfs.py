@@ -137,6 +137,9 @@ def _session() -> requests.Session:
     if s is None:
         s = requests.Session()
         s.headers["User-Agent"] = _UA
+        # 抓 OA 一律绕开系统/环境里的代理，理由见 entrez.use_proxy()：出版商对
+        # 机场、数据中心 IP 的反爬更严，代理反而降低命中率、还会成片 SSLError。
+        s.trust_env = entrez.use_proxy()
         _local.s = s
     return s
 

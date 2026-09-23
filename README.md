@@ -87,6 +87,14 @@ copy .env.example .env
 
 `DEEPL_API_KEY` 可选，用于把标题译成中文；不填只是不翻译，其余功能不受影响。
 
+> **本工具默认绕开系统/环境里的代理。** 本地代理（Clash 之类常驻 127.0.0.1:7890）是
+> 这类脚本最常见的疑难故障源：`requests` 在 macOS 上不只读 `HTTP_PROXY`，还会读系统
+> 网络配置，所以连定时任务也会被套上代理；节点一抖动就是 `NameResolutionError` /
+> `SSLEOFError`，整轮检索失败，而报错完全看不出跟代理有关。出版商对机场、数据中心 IP
+> 的反爬也更严，抓 OA 全文会更抓不到。NCBI / DeepL / Semantic Scholar 直连可达。
+> 若你的网络只能靠代理出网，在 `.env` 里写 `LITTRACK_USE_PROXY=1` 要回原来的行为。
+> （例外：`import-if` 不带 `--excel` 时要从 GitHub 下载数据，那一条仍走代理。）
+
 ---
 
 ## 二、描述你的方向（核心步骤）
@@ -230,6 +238,20 @@ PubMed 里，认不出属正常。
 **IF、文章类型、引用情况是收起式多选**：区间互不重叠，勾多个取并集（比如 IF 同时勾
 「< 5」和「≥ 20」看两头）；文章类型有 60 多种，摊平成一排勾选框会把筛选栏撑爆，
 所以收进下拉里。
+
+**类型标签可以人工钉死**。`pub_type` 一律取自 PubMed 的 PublicationType，绝大多数
+时候没问题；但少数条目 PubMed 只给 `Journal Article`（实际是 Research Highlight、
+没有摘要的指南之类），页面上就显示成泛泛的「Article」，按类型也筛不出来。这类判断
+没有可靠的自动规则，只能人工说了算：
+
+```bash
+python3 cli.py type --config <配置> --pmid 42482656 --label "Research Highlight"
+python3 cli.py type --config <配置> --list            # 看都钉过哪些
+python3 cli.py type --config <配置> --pmid 42482656 --clear
+```
+
+钉过的**不会被重新入库盖回去**——否则你改一次、下次 `add` 时 PubMed 的值再盖回来，
+等于这个功能不存在。删掉文献时它的覆盖也一并清掉。
 
 **下拉之间是联动的**：选定板块后，子板块和期刊会收窄到该板块**实际有文章**的那些；
 选定年份后月份同理。列出 0 篇的选项等于给人挖坑——选中后一片空白，还得回头怀疑是不是
@@ -429,6 +451,7 @@ python3 cli.py import-if --excel "/路径/你的JCR名单.xlsx"   # ② 用单�
 | `serve` | 收藏库网页按钮的后端服务 |
 | `obsidian` | 导出/刷新 Obsidian 笔记 |
 | `project` | 项目标签：列出 / 增删文献 / 改名 / 归档 / 删除 |
+| `type` | 人工钉死某篇的文章类型（`--pmid --label` / `--clear` / `--list`） |
 | `pdf` | 全文 PDF：`--status` / `--fetch` / `--import <目录>` / `--add --file` |
 | `citations` | 抓库内引文网络与全球被引数（`--force` 全量重抓） |
 | `import-if` | 生成 IF / 分区数据 |

@@ -86,13 +86,17 @@ def _translate(cfg, articles):
     import requests
     url = ("https://api-free.deepl.com/v2/translate" if key.endswith(":fx")
            else "https://api.deepl.com/v2/translate")
+    # 绕开系统/环境里的代理（理由见 entrez.use_proxy()）：DeepL 直连可达，
+    # 而代理一抖动这里就整批翻不出来，周报里的中文标题成片消失。
+    sess = requests.Session()
+    sess.trust_env = entrez.use_proxy()
     titles = [a["title"] for a in articles]
     out = [""] * len(titles)
     for i in range(0, len(titles), 50):
         batch = titles[i:i + 50]
         try:
-            r = requests.post(url, headers={"Authorization": f"DeepL-Auth-Key {key}"},
-                              json={"target_lang": "ZH", "text": batch}, timeout=30)
+            r = sess.post(url, headers={"Authorization": f"DeepL-Auth-Key {key}"},
+                          json={"target_lang": "ZH", "text": batch}, timeout=30)
             r.raise_for_status()
             for j, t in enumerate(r.json().get("translations", [])):
                 out[i + j] = t.get("text", "").rstrip("。.")
@@ -544,8 +548,8 @@ def main():
         epilog=__doc__)
     ap.add_argument("command", choices=["template", "from-excel", "check", "validate",
                                         "weekly", "history", "add", "import-refs",
-                                        "library", "obsidian", "project", "import-if",
-                                        "serve", "citations", "pdf"])
+                                        "library", "obsidian", "project", "type",
+                                        "import-if", "serve", "citations", "pdf"])
     ap.add_argument("--pmid", nargs="+", help="add：要收藏的 PMID，可多个")
     ap.add_argument("--section", help="add：手动指定板块（默认按配置自动判定）")
     ap.add_argument("--subsection", help="add：手动指定子板块")
@@ -575,6 +579,8 @@ def main():
     ap.add_argument("--file", help="pdf --add：本地 PDF 路径；"
                                    "import-refs：EndNote/Zotero 导出的文献文件")
     ap.add_argument("--status", action="store_true", help="pdf：看全文覆盖情况")
+    ap.add_argument("--label", help="type：要钉死的文章类型标签，如 Review / Editorial")
+    ap.add_argument("--clear", action="store_true", help="type：撤销该 PMID 的人工类型")
     ap.add_argument("--config", "-c", help="YAML 配置文件路径")
     ap.add_argument("--excel", "-e", help="Excel 配置文件路径")
     ap.add_argument("--out", "-o", help="输出路径（template / from-excel 用）")
@@ -715,6 +721,40 @@ def main():
                   f"       · 或在配置里补上相应关键词后重新入库\n"
                   f"     当前配置的板块：{'、'.join(cfg.section_names)}")
         print(f"\n  收藏库页面：{idx_path}")
+        return
+
+    # ── 文章类型标签的人工覆盖 ──
+    if args.command == "type":
+        from littrack import library, library_page
+        if args.list or not args.pmid:
+            rows = library.list_type_overrides(db_path)
+            if not rows:
+                print("还没有人工钉过类型的文章。\n"
+                      f"  用法：python3 cli.py type --config {cfg.path} "
+                      f"--pmid 42482656 --label Review")
+                return
+            print(f"人工钉过类型的 {len(rows)} 篇：")
+            for r in rows:
+                print(f"  {r['pmid']}  {(r['pub_type'] or ''):<16} {r['set_at']}  "
+                      f"{(r['title'] or '（已不在库中）')[:56]}")
+            return
+        if args.clear:
+            for pmid in args.pmid:
+                ok = library.clear_type_override(db_path, str(pmid))
+                print(f"{pmid}：{'已撤销人工类型' if ok else '本来就没有钉过'}")
+        else:
+            if not args.label:
+                ap.error("type 需要 --label 指定标签，例：--pmid 42482656 --label Review\n"
+                         "       撤销用 --clear，查看已钉的用 --list")
+            for pmid in args.pmid:
+                try:
+                    library.set_type_override(db_path, str(pmid), args.label)
+                except ValueError as e:
+                    print(f"{pmid}：{e}", file=sys.stderr)
+                    continue
+                print(f"{pmid} 的类型已钉为「{args.label}」，重新入库不会再被 PubMed 盖回去")
+        library_page.render(cfg, db_path, idx_path, port=_port(),
+                            token=_token(db_path.parent))
         return
 
     # ── 从 EndNote / Zotero 的导出文件批量入库 ──

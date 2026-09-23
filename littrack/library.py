@@ -66,6 +66,15 @@ def init_db(db_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_ap_project ON article_projects(project_id);
             CREATE INDEX IF NOT EXISTS idx_ap_pmid    ON article_projects(pmid);
+            -- 文章类型标签的人工覆盖。pub_type 一律取自 PubMed 的 PublicationType，
+            -- 而它对少数条目给不出有用的类型（只有 Journal Article，实际是
+            -- Research Highlight、无摘要的指南之类），改了又会在下次重新入库时
+            -- 被 PubMed 的值盖回去。此表登记「这篇由我说了算」，upsert 一律不动它。
+            CREATE TABLE IF NOT EXISTS type_overrides (
+                pmid     TEXT PRIMARY KEY,
+                pub_type TEXT,
+                set_at   TEXT
+            );
         """)
         _migrate(c)
 
@@ -104,18 +113,23 @@ def upsert(db_path: Path, articles: list[dict]) -> tuple[int, int]:
     today = str(datetime.date.today())
     added = updated = 0
     with _conn(db_path) as c:
+        pinned = {r["pmid"] for r in c.execute("SELECT pmid FROM type_overrides")}
         for a in articles:
             if c.execute("SELECT 1 FROM articles WHERE pmid=?", (a["pmid"],)).fetchone():
                 sets = ["title=?", "title_zh=?", "journal=?", "journal_abbr=?", "pub_date=?",
                         "abstract=?", "keywords=?", "affiliation=?", "authors=?", "doi=?",
-                        "if_value=?", "quartile=?", "pub_type=?"]
+                        "if_value=?", "quartile=?"]
                 vals = [a.get("title", ""), a.get("title_zh", ""),
                         a.get("journal") or a.get("journal_full", ""), a.get("journal_abbr", ""),
                         a.get("pub_date", ""), a.get("abstract", ""),
                         json.dumps(a.get("keywords") or [], ensure_ascii=False),
                         a.get("affiliation", ""), "; ".join(a.get("authors") or []),
-                        a.get("doi", ""), a.get("if_value", ""), a.get("quartile", ""),
-                        a.get("type_label", "")]
+                        a.get("doi", ""), a.get("if_value", ""), a.get("quartile", "")]
+                # 人工钉过类型的不动——否则每次重新入库都被 PubMed 的值盖回去，
+                # 用户改一次、系统改回来一次，等于这个功能不存在
+                if a["pmid"] not in pinned:
+                    sets.append("pub_type=?")
+                    vals.append(a.get("type_label", ""))
                 if a.get("section"):
                     sets += ["section=?", "subsection=?"]
                     vals += [a["section"], a.get("subsection", "")]
@@ -134,7 +148,7 @@ def upsert(db_path: Path, articles: list[dict]) -> tuple[int, int]:
                  a.get("abstract", ""), json.dumps(a.get("keywords") or [], ensure_ascii=False),
                  a.get("affiliation", ""), "; ".join(a.get("authors") or []),
                  a.get("doi", ""), a.get("if_value", ""), a.get("quartile", ""),
-                 a.get("type_label", ""), today))
+                 _pinned_type(c, a["pmid"]) or a.get("type_label", ""), today))
             added += 1
     return added, updated
 
@@ -160,6 +174,9 @@ def delete(db_path: Path, pmids: list[str]) -> int:
             hit = c.execute("DELETE FROM articles WHERE pmid=?", (str(p),)).rowcount
             n += hit
             c.execute("DELETE FROM article_projects WHERE pmid=?", (str(p),))
+            # 类型覆盖是「针对这篇」的人工裁决，文章都删了就没有意义；留着的话，
+            # 日后重新收藏同一篇会莫名其妙地自带一个早就忘了的标签
+            c.execute("DELETE FROM type_overrides WHERE pmid=?", (str(p),))
             if hit:
                 try:
                     pdfs.trash(pdf_dir, p)
@@ -189,6 +206,53 @@ def set_rating(db_path: Path, pmid: str, rating: str) -> bool:
     with _conn(db_path) as c:
         return c.execute("UPDATE articles SET rating=? WHERE pmid=?",
                          (rating, str(pmid))).rowcount > 0
+
+
+# ─── 文章类型标签的人工覆盖 ───────────────────────────────────────────────────
+# pub_type 取自 PubMed 的 PublicationType，绝大多数时候是对的。但少数条目 PubMed
+# 只给 Journal Article（实际是 Nature Reviews 的 Research Highlight、没有摘要的
+# 指南之类），页面上就显示成泛泛的「Article」，「文章类型」筛选也就筛不出来。
+# 这类判断没有可靠的自动规则，只能人工说了算——于是登记在这里，让重新入库不去动它。
+
+def _pinned_type(c, pmid: str) -> str:
+    r = c.execute("SELECT pub_type FROM type_overrides WHERE pmid=?", (str(pmid),)).fetchone()
+    return r["pub_type"] if r else ""
+
+
+def set_type_override(db_path: Path, pmid: str, label: str) -> None:
+    """把某篇的类型标签钉成 label，此后重新入库不再覆盖它。"""
+    pmid, label = str(pmid).strip(), (label or "").strip()
+    if not label:
+        raise ValueError("类型标签不能为空")
+    init_db(db_path)
+    with _conn(db_path) as c:
+        if not c.execute("SELECT 1 FROM articles WHERE pmid=?", (pmid,)).fetchone():
+            raise ValueError(f"收藏库里没有 PMID {pmid}")
+        c.execute("INSERT OR REPLACE INTO type_overrides (pmid, pub_type, set_at) "
+                  "VALUES (?,?,?)", (pmid, label, str(datetime.date.today())))
+        c.execute("UPDATE articles SET pub_type=? WHERE pmid=?", (label, pmid))
+
+
+def clear_type_override(db_path: Path, pmid: str) -> bool:
+    """撤销人工覆盖。
+
+    articles.pub_type 保持现状不动——下次重新入库时自然会被 PubMed 的值盖回去，
+    在这里擅自清空只会让页面上先空一阵。
+    """
+    init_db(db_path)
+    with _conn(db_path) as c:
+        return c.execute("DELETE FROM type_overrides WHERE pmid=?",
+                         (str(pmid).strip(),)).rowcount > 0
+
+
+def list_type_overrides(db_path: Path) -> list[dict]:
+    """列出所有人工钉过类型的文章：[{pmid, pub_type, set_at, title}]。"""
+    init_db(db_path)
+    with _conn(db_path) as c:
+        return [dict(r) for r in c.execute(
+            "SELECT o.pmid, o.pub_type, o.set_at, a.title FROM type_overrides o "
+            "LEFT JOIN articles a ON a.pmid = o.pmid "
+            "ORDER BY o.set_at DESC, o.pmid").fetchall()]
 
 
 # ─── 引文网络 ─────────────────────────────────────────────────────────────────

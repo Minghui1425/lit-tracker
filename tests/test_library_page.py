@@ -181,3 +181,7 @@ def test_an_empty_library_still_renders(cfg, db, tmp_path):
     out = tmp_path / "library.html"
     library_page.render(cfg, db, out, token="t")
     assert 'const LAST_ADDED = ""' in out.read_text(encoding="utf-8")
+
+
+def test_back_to_top_button_is_present(page):
+    assert "id=to-top" in page and "返回顶部" in page

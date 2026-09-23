@@ -53,6 +53,14 @@ h1{font-size:21px;margin:0 0 4px}
 .vr{width:1px;height:18px;background:#ddd;margin:0 2px}
 .row-break{flex-basis:100%;display:flex;align-items:center;gap:10px}
 #cnt{font-size:13px;color:#666;margin-bottom:8px}
+/* 返回顶部：滚过大半屏后淡入。收藏库动辄几百行，筛完想改筛选条件就得一路滚回去 */
+#to-top{position:fixed;right:28px;bottom:32px;width:44px;height:44px;border-radius:50%;
+ border:1px solid #e0e0e0;background:#fff;color:#0056b3;font-size:20px;line-height:1;
+ cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.14);z-index:800;
+ display:flex;align-items:center;justify-content:center;
+ opacity:0;visibility:hidden;transition:opacity .2s,visibility .2s,box-shadow .2s}
+#to-top.show{opacity:1;visibility:visible}
+#to-top:hover{box-shadow:0 4px 18px rgba(0,0,0,.22)}
 table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #ddd;
  border-radius:6px;overflow:hidden;font-size:13px}
 th{background:#f0f4f8;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;
@@ -268,6 +276,7 @@ def render(config, db_path: Path, out_path: Path, *, port: int = 8765,
     html_doc = f"""<!doctype html><html lang=zh-CN><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>{_esc(config.project_name)} · 收藏库</title><style>{_CSS}</style></head><body>
+<button id=to-top title="返回顶部" aria-label="返回顶部">↑</button>
 <div id=povl class=ovl onclick="closeProj()"></div>
 <div id=pmod>
   <h3 id=pm-title></h3>
@@ -899,6 +908,22 @@ function exportNbib(ev){{
     .then(()=>{{ if(btn){{ btn.disabled=false; btn.textContent=lab; }} }});
 }}
 onSec();
+
+// 返回顶部：滚过大半屏才出现，免得一进页面就挡住第一行
+(function(){{
+  const btn=document.getElementById('to-top');
+  if(!btn) return;
+  const sync=()=>btn.classList.toggle('show', window.scrollY > window.innerHeight*0.6);
+  window.addEventListener('scroll', sync, {{passive:true}});
+  btn.addEventListener('click', ()=>{{
+    const from=window.scrollY;
+    window.scrollTo({{top:0, behavior:'smooth'}});
+    // 有些环境会把平滑滚动整个吞掉（内嵌预览、部分无障碍设置），点了毫无反应。
+    // 只在「压根没动」时才兜底硬跳，正常动起来的长页面不会被打断。
+    setTimeout(()=>{{ if(window.scrollY===from && from>0) window.scrollTo(0,0); }}, 700);
+  }});
+  sync();
+}})();
 </script></body></html>"""
 
     _sanity_check(html_doc)

@@ -33,8 +33,26 @@ class NetworkError(RuntimeError):
     """重试耗尽后仍连不上 NCBI。单独立类型，便于入口层给出友好提示而不吞掉真 bug。"""
 
 
+def use_proxy() -> bool:
+    """要不要让 requests 读系统/环境里的代理设置。默认**不读**。
+
+    本地代理（Clash 之类常驻 127.0.0.1:7890）是这类脚本最常见的疑难故障源：
+    requests 的 trust_env 在 macOS 上不只读 HTTP_PROXY/HTTPS_PROXY，urllib 的
+    getproxies() 还会读系统网络配置，所以连定时任务（没有 shell 环境）也会被套上
+    代理；代理节点一抖动，表现出来就是 NameResolutionError / SSLEOFError，
+    整轮检索失败，而报错完全看不出跟代理有关。
+
+    NCBI / DeepL / Semantic Scholar / OA 出版商都是直连可达的，走代理只增加故障面，
+    出版商那边还会因为机场、数据中心 IP 而触发更严的反爬。
+    确实需要靠代理才能出网的（公司网络只开代理出口），在 .env 里写
+    LITTRACK_USE_PROXY=1 恢复原行为。
+    """
+    return os.environ.get("LITTRACK_USE_PROXY", "").strip().lower() in ("1", "true", "yes")
+
+
 _SESSION = requests.Session()
 _SESSION.headers.update({"Connection": "keep-alive"})
+_SESSION.trust_env = use_proxy()
 
 
 def _api_key() -> str:
